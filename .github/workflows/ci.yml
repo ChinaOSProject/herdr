@@ -240,7 +240,8 @@ jobs:
                 -ExePath $exe `
                 -Session "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
             } catch {
-              if ($_.Exception.Message -notlike "workspace create failed with exit code*") {
+              if ($_.Exception.Message -notlike "workspace create failed with exit code*" -and
+                  $_.Exception.Message -notlike "server exited with exit code*") {
                 throw
               }
               $rejected = $true
