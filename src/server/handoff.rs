@@ -331,7 +331,6 @@ pub(crate) fn accept_windows_handoff(
     panes: Vec<crate::pty::backend::WindowsPtyHandoff>,
     listeners: [crate::platform::WindowsListenerHandoff; 2],
 ) -> io::Result<HandoffStream> {
-    crate::platform::ensure_same_process_session(child.id())?;
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
     let stream = loop {
         match listener.accept() {

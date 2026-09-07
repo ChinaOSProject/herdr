@@ -190,16 +190,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
                 event_hub.clone(),
                 should_quit.clone(),
             )?;
-            let mut server = HeadlessServer::new(
+            let server = HeadlessServer::new(
                 app,
                 &loaded_config.diagnostics,
                 Some(api_tx.clone()),
                 Some(api_server),
                 should_quit,
             )?;
-            // Carried across before any client attaches, so the first title sent is
-            // the override rather than the configured one it replaced.
-            server.api_window_title = received.manifest.api_window_title.clone();
             crate::server::handoff::report_ready(&mut received.stream)?;
             crate::server::handoff::wait_committed(&mut received.stream)?;
             server
