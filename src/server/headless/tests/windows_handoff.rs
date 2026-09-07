@@ -152,9 +152,11 @@ impl Session {
     fn observe_child(&self, pane: &str, label: &str) -> String {
         let path = self.root.join(label);
         self.input(pane, &format!("[IO.File]::WriteAllText('{}', \"$PID|$([Console]::WindowWidth)|$([Console]::WindowHeight)|ü🦀\")", path.to_string_lossy().replace('\'', "''")));
-        wait(|| path.exists());
-        let value = fs::read_to_string(path).unwrap();
-        assert!(value.ends_with("ü🦀"), "Unicode input was damaged: {value}");
+        let mut value = String::new();
+        wait(|| {
+            value = fs::read_to_string(&path).unwrap_or_default();
+            value.ends_with("ü🦀")
+        });
         value
     }
 
@@ -181,13 +183,14 @@ impl Drop for Session {
             PROCESS_TERMINATE,
         };
         // The marker belongs to the unique session launched by this test.
-        let owner = if self.api_path().exists() && self.pid() != std::process::id() {
-            let raw =
-                unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, self.pid()) };
-            (!raw.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(raw) })
-        } else {
-            None
-        };
+        let owner = fs::read_to_string(self.api_path())
+            .ok()
+            .and_then(|marker| marker.split(':').next()?.parse::<u32>().ok())
+            .filter(|pid| *pid != std::process::id())
+            .and_then(|pid| {
+                let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
+                (!raw.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(raw) })
+            });
         // Only this test's named session is addressed, including after replacement.
         if owner.is_some() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -303,6 +306,7 @@ fn windows_handoff_preserves_two_children_io_resize_and_exit() {
                 pid
             );
         }
+        tui.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         protocol::write_message(&mut tui, &ClientMessage::Detach).unwrap();
         drop(tui);
         let reconnected = session.tui(140, 45);
