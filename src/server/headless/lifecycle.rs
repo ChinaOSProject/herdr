@@ -113,13 +113,14 @@ impl HeadlessServer {
                 params.expected_version,
                 self.api_window_title.clone(),
             );
-            let child = import_child.insert(handoff::spawn_handoff_import(
+            let _child = import_child.insert(handoff::spawn_handoff_import(
                 params.import_exe.as_deref().map(Path::new),
                 &socket_path,
                 &token,
             )?);
             #[cfg(windows)]
             let mut stream = {
+                let child = _child;
                 crate::platform::ensure_same_process_session(child.id())?;
                 let panes = entries
                     .iter()
