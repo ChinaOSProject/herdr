@@ -101,7 +101,8 @@ try {
         $ErrorActionPreference = $savedErrorActionPreference
     }
     if ($createdExitCode -ne 0) {
-        throw "workspace create failed with exit code $createdExitCode`: $($created -join "`n")"
+        $serverError = Get-Content -LiteralPath $serverErrorPath -Raw
+        throw "workspace create failed with exit code $createdExitCode`: $($created -join "`n")`n$serverError"
     }
     $paneId = (($created -join "`n") | ConvertFrom-Json).result.root_pane.pane_id
     if ([string]::IsNullOrWhiteSpace($paneId)) {
