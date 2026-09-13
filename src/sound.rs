@@ -18,10 +18,6 @@ use tracing::warn;
 const DISABLE_SOUND_ENV: &str = "HERDR_DISABLE_SOUND";
 #[cfg(any(windows, test))]
 const WINDOWS_SOUND_PATH_ENV: &str = "HERDR_SOUND_PATH";
-/// Test-only override for the Windows player's playback timeout. Production
-/// leaves this unset so the embedded script keeps its 15 second bound.
-#[cfg(test)]
-const WINDOWS_SOUND_TIMEOUT_ENV: &str = "HERDR_SOUND_TIMEOUT_SECONDS";
 #[cfg(not(any(windows, target_os = "macos")))]
 const AUDIO_PLAYER_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -138,16 +134,13 @@ fn windows_media_player_script() -> &'static str {
 $ErrorActionPreference = 'Stop'
 $Path = [Environment]::GetEnvironmentVariable('HERDR_SOUND_PATH', 'Process')
 if ([string]::IsNullOrWhiteSpace($Path)) { throw 'HERDR_SOUND_PATH is not set' }
-$timeoutSeconds = 15
-$timeoutOverride = [Environment]::GetEnvironmentVariable('HERDR_SOUND_TIMEOUT_SECONDS', 'Process')
-if (-not [string]::IsNullOrWhiteSpace($timeoutOverride)) { $timeoutSeconds = [int]$timeoutOverride }
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
 $script:player = [System.Windows.Media.MediaPlayer]::new()
 $script:frame = [System.Windows.Threading.DispatcherFrame]::new()
 $script:timer = [System.Windows.Threading.DispatcherTimer]::new()
-$script:timer.Interval = [TimeSpan]::FromSeconds($timeoutSeconds)
+$script:timer.Interval = [TimeSpan]::FromSeconds(15)
 $script:failed = $null
 $script:timedOut = $false
 $script:player.add_MediaOpened({ $script:player.Play() })
@@ -174,8 +167,18 @@ if ($script:timedOut) { throw 'sound playback timed out' }
 "#
 }
 
+/// Builds the same player script with a shorter timer for tests. Production
+/// keeps the fixed 15 second bound in `windows_media_player_script`.
+#[cfg(test)]
+fn windows_media_player_script_with_timeout(timeout_seconds: u64) -> String {
+    windows_media_player_script().replace(
+        "FromSeconds(15)",
+        &format!("FromSeconds({timeout_seconds})"),
+    )
+}
+
 #[cfg(any(windows, test))]
-fn windows_player_command(path: &Path) -> Command {
+fn windows_player_command(path: &Path, script: &str) -> Command {
     let mut command = crate::noninteractive_process::command("powershell.exe");
     command
         .args([
@@ -185,7 +188,7 @@ fn windows_player_command(path: &Path) -> Command {
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            windows_media_player_script(),
+            script,
         ])
         .env(WINDOWS_SOUND_PATH_ENV, path);
     command
@@ -193,7 +196,7 @@ fn windows_player_command(path: &Path) -> Command {
 
 #[cfg(windows)]
 fn run_windows_player(path: &Path) -> Result<Output, String> {
-    windows_player_command(path)
+    windows_player_command(path, windows_media_player_script())
         .output()
         .map_err(|e| format!("Windows MediaPlayer playback failed: {e}"))
 }
@@ -437,7 +440,7 @@ mod tests {
     fn windows_media_player_uses_process_environment_and_dispatcher() {
         let script = windows_media_player_script();
         let path = Path::new(r"C:\sound dir\döne.mp3");
-        let command = windows_player_command(path);
+        let command = windows_player_command(path, script);
         let env_path = command.get_envs().find_map(|(key, value)| {
             (key == std::ffi::OsStr::new(WINDOWS_SOUND_PATH_ENV))
                 .then_some(value)
@@ -450,8 +453,8 @@ mod tests {
         assert!(script.contains("Dispatcher]::PushFrame"));
         assert!(script.contains("add_MediaEnded"));
         assert!(script.contains("add_MediaFailed"));
-        assert!(script.contains(WINDOWS_SOUND_TIMEOUT_ENV));
-        assert!(script.contains("FromSeconds($timeoutSeconds)"));
+        assert!(script.contains("FromSeconds(15)"));
+        assert!(windows_media_player_script_with_timeout(2).contains("FromSeconds(2)"));
         assert_eq!(env_path, Some(path.as_os_str()));
         assert!(!command.get_args().any(|arg| arg == path.as_os_str()));
     }
@@ -462,12 +465,11 @@ mod tests {
         let _lock = crate::integration::integration_env_lock();
         let path = temp_sound_path();
         std::fs::write(&path, b"not an mp3").unwrap();
-        let mut command = windows_player_command(&path);
+        let script = windows_media_player_script_with_timeout(2);
         // Whether the host media stack raises MediaFailed before the playback
-        // timeout is environment-dependent, so keep the bound short and accept
-        // either terminal error instead of waiting out the production timeout.
-        command.env(WINDOWS_SOUND_TIMEOUT_ENV, "2");
-        let output = command.output().unwrap();
+        // timeout is environment-dependent, so use a short test-only timer and
+        // accept either terminal error instead of the production 15 second wait.
+        let output = windows_player_command(&path, &script).output().unwrap();
         let _ = std::fs::remove_file(path);
 
         assert!(!output.status.success());
