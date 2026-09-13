@@ -2704,6 +2704,27 @@ fn install_hermes_converts_flow_plugin_list_to_block_list() {
 }
 
 #[test]
+fn install_hermes_converts_inline_enabled_list_to_block_list() {
+    let config = update_hermes_enabled_plugin("plugins:\n  enabled: [example-plugin]\n", true);
+    assert_eq!(
+        config,
+        "plugins:\n  enabled:\n    - herdr-agent-state\n    - example-plugin\n"
+    );
+}
+
+#[test]
+fn install_hermes_is_idempotent_for_inline_enabled_list_entry() {
+    let config = update_hermes_enabled_plugin(
+        "plugins:\n  enabled: [herdr-agent-state, example-plugin]\n",
+        true,
+    );
+    assert_eq!(
+        config,
+        "plugins:\n  enabled: [herdr-agent-state, example-plugin]\n"
+    );
+}
+
+#[test]
 fn install_hermes_is_idempotent_for_quoted_flat_plugin_entry() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -2822,6 +2843,21 @@ fn uninstall_hermes_removes_flow_plugin_list_entry() {
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn uninstall_hermes_removes_inline_enabled_list_entry() {
+    let config = update_hermes_enabled_plugin(
+        "plugins:\n  enabled: [example-plugin, herdr-agent-state]\n",
+        false,
+    );
+    assert_eq!(config, "plugins:\n  enabled:\n    - example-plugin\n");
+}
+
+#[test]
+fn uninstall_hermes_converts_single_inline_enabled_entry_to_empty_list() {
+    let config = update_hermes_enabled_plugin("plugins:\n  enabled: [herdr-agent-state]\n", false);
+    assert_eq!(config, "plugins:\n  enabled: []\n");
 }
 
 #[test]
