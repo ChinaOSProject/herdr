@@ -2713,6 +2713,38 @@ fn install_hermes_converts_inline_enabled_list_to_block_list() {
 }
 
 #[test]
+fn install_hermes_preserves_quoted_inline_enabled_items() {
+    let config =
+        update_hermes_enabled_plugin("plugins:\n  enabled: [\"null\", 'foo: bar']\n", true);
+    assert_eq!(
+        config,
+        "plugins:\n  enabled:\n    - herdr-agent-state\n    - \"null\"\n    - 'foo: bar'\n"
+    );
+}
+
+#[test]
+fn install_hermes_preserves_inline_enabled_comment() {
+    let config = update_hermes_enabled_plugin(
+        "plugins:\n  enabled: [example-plugin] # managed locally\n",
+        true,
+    );
+    assert_eq!(
+        config,
+        "plugins:\n  enabled: # managed locally\n    - herdr-agent-state\n    - example-plugin\n"
+    );
+}
+
+#[test]
+fn install_hermes_preserves_inline_plugins_comment() {
+    let config =
+        update_hermes_enabled_plugin("plugins: [platforms/discord] # managed locally\n", true);
+    assert_eq!(
+        config,
+        "plugins: # managed locally\n  - herdr-agent-state\n  - platforms/discord\n"
+    );
+}
+
+#[test]
 fn install_hermes_is_idempotent_for_inline_enabled_list_entry() {
     let config = update_hermes_enabled_plugin(
         "plugins:\n  enabled: [herdr-agent-state, example-plugin]\n",
@@ -2852,6 +2884,15 @@ fn uninstall_hermes_removes_inline_enabled_list_entry() {
         false,
     );
     assert_eq!(config, "plugins:\n  enabled:\n    - example-plugin\n");
+}
+
+#[test]
+fn uninstall_hermes_preserves_quoted_inline_enabled_items() {
+    let config = update_hermes_enabled_plugin(
+        "plugins:\n  enabled: ['foo: bar', herdr-agent-state]\n",
+        false,
+    );
+    assert_eq!(config, "plugins:\n  enabled:\n    - 'foo: bar'\n");
 }
 
 #[test]
