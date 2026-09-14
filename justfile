@@ -19,10 +19,6 @@ maintenance-test:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
-# Rootless Linux SSH teardown smoke, comparing an old and a candidate binary
-smoke-ssh-bridge-liveness before after:
-    bun scripts/smoke_ssh_bridge_liveness.mjs "{{before}}" "{{after}}"
-
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
     {{python}} -m unittest scripts.test_ui_hot_path_architecture
