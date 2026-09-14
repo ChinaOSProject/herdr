@@ -30,6 +30,7 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
+    spinner_frame: Option<usize>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
@@ -82,7 +83,7 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(status, config.status_indicators),
+            status_icon(status, config.status_indicators, spinner_frame),
             Style::default().fg(status_color(status, palette)),
         );
         hits.workspaces.push(WorkspaceHit {
@@ -149,7 +150,7 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(agent.agent_status, config.status_indicators),
+            status_icon(agent.agent_status, config.status_indicators, spinner_frame),
             Style::default().fg(status_color(agent.agent_status, palette)),
         );
         hits.agents.push((rect, pane_id));
@@ -310,7 +311,7 @@ pub(crate) fn render_sidebar(
             rect,
             workspace,
             status,
-            config.status_indicators,
+            (config.status_indicators, state.spinner_frame),
             entry,
             rows,
             true,
@@ -420,6 +421,7 @@ pub(crate) fn render_sidebar(
         snapshot,
         config,
         state.agent_scroll,
+        state.spinner_frame,
         hits,
     );
 
@@ -641,7 +643,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
     area: Rect,
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
-    indicators: crate::config::StatusIndicatorStyle,
+    indicators: (crate::config::StatusIndicatorStyle, Option<usize>),
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
     endpoint_active: bool,
@@ -700,7 +702,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
         let spans = crate::ui::resolved_token_spans(
             row,
             (
-                status_icon(status, indicators),
+                status_icon(status, indicators.0, indicators.1),
                 Style::default().fg(status_color(status, palette)),
             ),
             Style::default().fg(status_color(status, palette)),

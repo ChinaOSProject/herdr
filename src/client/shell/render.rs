@@ -247,6 +247,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    pub(super) spinner_frame: Option<usize>,
 }
 
 pub(super) fn render_shell(
@@ -295,6 +296,7 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                state.spinner_frame,
                 &mut hits,
             );
         } else {

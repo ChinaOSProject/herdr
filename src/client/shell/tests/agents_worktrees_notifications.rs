@@ -610,6 +610,69 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
 }
 
 #[test]
+fn animated_status_advances_only_on_its_desktop_deadline() {
+    use crate::config::StatusIndicatorStyle::Animated;
+
+    assert_eq!(status_icon(AgentStatus::Blocked, Animated, None), "▲");
+    assert_eq!(status_icon(AgentStatus::Done, Animated, None), "✓");
+    assert_eq!(status_icon(AgentStatus::Idle, Animated, None), "✓");
+    assert_eq!(status_icon(AgentStatus::Unknown, Animated, None), "·");
+
+    let mut projected = snapshot();
+    projected.agents = vec![ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("worker".into()),
+        display_agent: None,
+        agent: Some("pi".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Working,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    }];
+    projected.workspaces[0].agent_status = AgentStatus::Working;
+    let mut config = Config::default();
+    config.ui.status_indicators = Animated;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+
+    let first = state.compose(106, 30).expect("initial animated frame");
+    assert!(frame_rows(&first).iter().any(|row| row.contains('⠋')));
+    assert!(frame_rows(&first).iter().any(|row| row.contains("LIVE")));
+
+    let now = std::time::Instant::now();
+    assert_eq!(state.timer_delay(now), std::time::Duration::from_millis(80));
+    let deadline = state.next_spinner_frame.expect("spinner deadline");
+    assert!(!state.tick_spinner(deadline - std::time::Duration::from_millis(1)));
+    assert_eq!(state.next_spinner_frame, Some(deadline));
+    assert!(state.tick_spinner(deadline));
+
+    let second = state.compose(106, 30).expect("advanced animated frame");
+    assert!(frame_rows(&second).iter().any(|row| row.contains('⠙')));
+    assert!(frame_rows(&second).iter().any(|row| row.contains("LIVE")));
+
+    state.config.status_indicators = crate::config::StatusIndicatorStyle::Dots;
+    assert_eq!(
+        state.timer_delay(deadline),
+        std::time::Duration::from_millis(100)
+    );
+    assert_eq!(state.spinner_frame, 0);
+    assert_eq!(state.next_spinner_frame, None);
+
+    state.config.status_indicators = Animated;
+    state.mode = ClientShellMode::Navigate;
+    assert!(!state.tick_spinner(deadline + std::time::Duration::from_millis(80)));
+    assert_eq!(state.spinner_frame, 0);
+    assert_eq!(state.next_spinner_frame, None);
+}
+
+#[test]
 fn workspace_state_text_does_not_stack_terminal_faint() {
     use crate::config::SpaceSidebarToken;
 
