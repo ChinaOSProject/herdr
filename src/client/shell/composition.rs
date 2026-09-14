@@ -20,6 +20,90 @@ fn restore_mode_bar(
 }
 
 impl ClientShellState {
+    pub(crate) fn compose_spinner_patch(
+        &mut self,
+        cols: u16,
+        rows: u16,
+    ) -> Option<ClientComposedSurfacePatch> {
+        if self.mode != ClientShellMode::Terminal
+            || self.last_composed_size != Some((cols, rows))
+            || self.overlay.is_some()
+            || self.endpoint_error.is_some()
+            || self.config_diagnostic.is_some()
+            || self.visible_endpoint_notice.is_some()
+            || self.visible_notification.is_some()
+            || self.copy_feedback.is_some()
+            || self.chrome_drag.is_some()
+            || self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online)
+            || self.pending_pane_surface.is_some()
+            || self.pane_surface_generation != self.active_snapshot_generation
+        {
+            return None;
+        }
+        let snapshot = self.snapshot.as_deref()?;
+        let surface = self.pane_surface.as_ref()?;
+        if snapshot.revision != surface.projection_revision {
+            return None;
+        }
+        let sidebar = self.layout(cols, rows).sidebar;
+        if sidebar.is_empty() {
+            return None;
+        }
+
+        let mut buffer = Buffer::empty(sidebar);
+        let mut hits = ShellHitMap::default();
+        let mut render_state = render::ShellRenderState {
+            endpoints: &self.endpoints,
+            active_endpoint_id: &self.active_endpoint_id,
+            collapsed_endpoints: &self.collapsed_endpoints,
+            collapsed_groups: &self.collapsed_groups,
+            remote_collapsed_groups: &self.remote_collapsed_groups,
+            workspace_scroll: &mut self.workspace_scroll,
+            agent_scroll: &mut self.agent_scroll,
+            tab_scroll: &mut self.tab_scroll,
+            reveal_focused_workspace: &mut self.reveal_focused_workspace,
+            reveal_focused_tab: &mut self.reveal_focused_tab,
+            sidebar_collapsed: self.sidebar_collapsed,
+            sidebar_section_split: self.sidebar_section_split,
+            tab_drag_insert_index: None,
+            selected_workspace_id: None,
+            reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
+            dragged_workspace_id: None,
+            workspace_drop_indicator_row: None,
+            spinner_frame: Some(self.spinner_frame),
+        };
+        render::render_shell_sidebar(
+            &mut buffer,
+            sidebar,
+            snapshot,
+            &self.config,
+            &mut render_state,
+            &mut hits,
+        );
+
+        let rows = (sidebar.y..sidebar.bottom())
+            .map(|y| {
+                let cells = (sidebar.x..sidebar.right())
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map(crate::protocol::CellData::from_ratatui_cell)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(crate::protocol::PaneSurfacePatchRow {
+                    x: sidebar.x,
+                    y,
+                    cells,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(ClientComposedSurfacePatch {
+            rows,
+            cursor: None,
+            preserve_cursor: true,
+        })
+    }
+
     fn compose_unavailable(&mut self, cols: u16, rows: u16) -> FrameData {
         let layout = self.layout(cols, rows);
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));

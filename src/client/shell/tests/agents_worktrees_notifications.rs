@@ -639,23 +639,43 @@ fn animated_status_advances_only_on_its_desktop_deadline() {
     let mut config = Config::default();
     config.ui.status_indicators = Animated;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
-    state.set_snapshot(Box::new(projected));
+    state.set_snapshot(Box::new(projected.clone()));
     state.set_pane_surface(surface());
+    let mut full_state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    full_state.set_snapshot(Box::new(projected));
+    full_state.set_pane_surface(surface());
 
     let first = state.compose(106, 30).expect("initial animated frame");
+    full_state.compose(106, 30).expect("initial full frame");
     assert!(frame_rows(&first).iter().any(|row| row.contains('⠋')));
     assert!(frame_rows(&first).iter().any(|row| row.contains("LIVE")));
 
     let now = std::time::Instant::now();
     assert_eq!(state.timer_delay(now), std::time::Duration::from_millis(80));
     let deadline = state.next_spinner_frame.expect("spinner deadline");
+    full_state.timer_delay(now);
     assert!(!state.tick_spinner(deadline - std::time::Duration::from_millis(1)));
     assert_eq!(state.next_spinner_frame, Some(deadline));
     assert!(state.tick_spinner(deadline));
+    assert!(full_state.tick_spinner(deadline));
 
-    let second = state.compose(106, 30).expect("advanced animated frame");
+    let scroll_state = (state.workspace_scroll, state.agent_scroll);
+    let patch = state
+        .compose_spinner_patch(106, 30)
+        .expect("animated sidebar patch");
+    let patched = apply_composed_surface_patch(&first, patch).expect("applicable sidebar patch");
+    assert_eq!((state.workspace_scroll, state.agent_scroll), scroll_state);
+    let second = full_state.compose(106, 30).expect("advanced full frame");
+    assert_eq!(patched, second);
     assert!(frame_rows(&second).iter().any(|row| row.contains('⠙')));
     assert!(frame_rows(&second).iter().any(|row| row.contains("LIVE")));
+
+    state.chrome_drag = Some(ClientChromeDrag::SidebarWidth);
+    assert!(state.compose_spinner_patch(106, 30).is_none());
+    state.chrome_drag = None;
+    state.endpoints[0].status = ClientEndpointStatus::Reconnecting;
+    assert!(state.compose_spinner_patch(106, 30).is_none());
+    state.endpoints[0].status = ClientEndpointStatus::Online;
 
     state.config.status_indicators = crate::config::StatusIndicatorStyle::Dots;
     assert_eq!(

@@ -250,6 +250,44 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) spinner_frame: Option<usize>,
 }
 
+pub(super) fn render_shell_sidebar(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    state: &mut ShellRenderState<'_>,
+    hits: &mut ShellHitMap,
+) {
+    if state.endpoints.len() > 1 {
+        if state.sidebar_collapsed {
+            super::endpoint_sidebar::render_collapsed(buffer, area, config, state, hits);
+        } else {
+            super::endpoint_sidebar::render_expanded(
+                buffer,
+                area,
+                Some(snapshot),
+                config,
+                state,
+                hits,
+            );
+        }
+    } else if state.sidebar_collapsed {
+        render_collapsed_sidebar(
+            buffer,
+            area,
+            snapshot,
+            config,
+            state
+                .selected_workspace_id
+                .map(|target| target.workspace_id.as_str()),
+            state.spinner_frame,
+            hits,
+        );
+    } else {
+        render_sidebar(buffer, area, snapshot, config, state, hits);
+    }
+}
+
 pub(super) fn render_shell(
     buffer: &mut Buffer,
     layout: ClientShellLayout,
@@ -268,47 +306,14 @@ pub(super) fn render_shell(
         );
     }
     if layout.sidebar.width > 0 {
-        if state.endpoints.len() > 1 {
-            if state.sidebar_collapsed {
-                super::endpoint_sidebar::render_collapsed(
-                    buffer,
-                    layout.sidebar,
-                    config,
-                    &mut state,
-                    &mut hits,
-                );
-            } else {
-                super::endpoint_sidebar::render_expanded(
-                    buffer,
-                    layout.sidebar,
-                    Some(snapshot),
-                    config,
-                    &mut state,
-                    &mut hits,
-                );
-            }
-        } else if state.sidebar_collapsed {
-            render_collapsed_sidebar(
-                buffer,
-                layout.sidebar,
-                snapshot,
-                config,
-                state
-                    .selected_workspace_id
-                    .map(|target| target.workspace_id.as_str()),
-                state.spinner_frame,
-                &mut hits,
-            );
-        } else {
-            render_sidebar(
-                buffer,
-                layout.sidebar,
-                snapshot,
-                config,
-                &mut state,
-                &mut hits,
-            );
-        }
+        render_shell_sidebar(
+            buffer,
+            layout.sidebar,
+            snapshot,
+            config,
+            &mut state,
+            &mut hits,
+        );
     }
     if layout.tab_bar.height > 0 {
         render_tab_bar(
