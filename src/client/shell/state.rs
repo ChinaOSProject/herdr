@@ -152,6 +152,7 @@ pub(super) struct ShellHitMap {
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
     pub(super) endpoint_agents: Vec<(Rect, ClientEndpointId, String)>,
+    pub(super) animated_status_visible: bool,
     pub(super) agent_body: Rect,
     pub(super) agent_scrollbar: Rect,
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -1918,14 +1919,7 @@ impl ClientShellState {
             && self
                 .last_composed_size
                 .is_some_and(|(cols, rows)| self.layout(cols, rows).sidebar.width > 0)
-            && self.endpoints.iter().any(|endpoint| {
-                endpoint.status == ClientEndpointStatus::Online
-                    && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                        snapshot.agents.iter().any(|agent| {
-                            agent.agent_status == crate::api::schema::AgentStatus::Working
-                        })
-                    })
-            })
+            && self.hits.animated_status_visible
     }
 
     fn sync_spinner_deadline(&mut self, now: std::time::Instant) {

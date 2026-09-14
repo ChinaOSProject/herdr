@@ -670,6 +670,48 @@ fn animated_status_advances_only_on_its_desktop_deadline() {
     assert!(frame_rows(&second).iter().any(|row| row.contains('⠙')));
     assert!(frame_rows(&second).iter().any(|row| row.contains("LIVE")));
 
+    state.snapshot.as_mut().expect("snapshot").workspaces[0].agent_status = AgentStatus::Idle;
+    state.endpoints[0]
+        .snapshot
+        .as_mut()
+        .expect("endpoint snapshot")
+        .workspaces[0]
+        .agent_status = AgentStatus::Idle;
+    state.agent_scroll = 1;
+    state
+        .compose(106, 7)
+        .expect("working agent scrolled out of view");
+    assert_eq!(
+        state.timer_delay(deadline),
+        std::time::Duration::from_millis(100)
+    );
+    assert_eq!(state.next_spinner_frame, None);
+
+    let projected = state.snapshot.as_mut().expect("snapshot");
+    projected.workspaces[0].agent_status = AgentStatus::Working;
+    projected.workspaces[0].worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: false,
+    });
+    let mut child = projected.workspaces[0].clone();
+    child.workspace_id = "ws_2".into();
+    child.agent_status = AgentStatus::Blocked;
+    child
+        .worktree
+        .as_mut()
+        .expect("worktree")
+        .is_linked_worktree = true;
+    projected.workspaces.push(child);
+    state.endpoints[0].snapshot = state.snapshot.clone();
+    state.collapsed_groups.insert("repo".into());
+    state.sidebar_collapsed = true;
+    state.compose(106, 7).expect("collapsed working workspace");
+    assert_eq!(
+        state.timer_delay(deadline),
+        std::time::Duration::from_millis(80)
+    );
+
     state.chrome_drag = Some(ClientChromeDrag::SidebarWidth);
     assert!(state.compose_spinner_patch(106, 30).is_none());
     state.chrome_drag = None;
