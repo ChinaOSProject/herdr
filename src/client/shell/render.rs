@@ -286,6 +286,9 @@ pub(super) fn render_shell_sidebar(
     } else {
         render_sidebar(buffer, area, snapshot, config, state, hits);
     }
+    let sidebar_toggle = hits.sidebar_toggle;
+    hits.animated_status_cells
+        .retain(|cell| !super::contains(sidebar_toggle, (cell.x, cell.y)));
 }
 
 pub(super) fn record_animated_status_cells(

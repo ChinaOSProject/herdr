@@ -1922,6 +1922,7 @@ impl ClientShellState {
     fn spinner_eligible(&self) -> bool {
         self.config.status_indicators == crate::config::StatusIndicatorStyle::Animated
             && self.mode != ClientShellMode::Navigate
+            && self.endpoint_status(&self.active_endpoint_id) == Some(ClientEndpointStatus::Online)
             && self
                 .last_composed_size
                 .is_some_and(|(cols, rows)| self.layout(cols, rows).sidebar.width > 0)

@@ -719,6 +719,7 @@ fn animated_status_advances_only_on_its_desktop_deadline() {
     state.chrome_drag = None;
     state.endpoints[0].status = ClientEndpointStatus::Reconnecting;
     assert!(state.compose_spinner_patch(106, 30).is_none());
+    assert!(!state.tick_spinner(deadline + std::time::Duration::from_millis(80)));
     state.endpoints[0].status = ClientEndpointStatus::Online;
 
     state.config.status_indicators = crate::config::StatusIndicatorStyle::Dots;

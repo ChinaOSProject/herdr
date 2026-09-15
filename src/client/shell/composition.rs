@@ -54,7 +54,8 @@ impl ClientShellState {
             .iter()
             .map(|spinner| {
                 let mut cell = spinner.cell.clone();
-                cell.symbol = (*symbol).to_owned();
+                cell.symbol.clear();
+                cell.symbol.push_str(symbol);
                 crate::protocol::PaneSurfacePatchRow {
                     x: spinner.x,
                     y: spinner.y,

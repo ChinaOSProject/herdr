@@ -140,6 +140,44 @@ fn collapsed_wide_machine_initial_records_the_spinner_cell() {
 }
 
 #[test]
+fn sidebar_toggle_is_not_retained_as_a_spinner_cell() {
+    let (mut state, _) = state_with_scrollable_agents();
+    state.config.status_indicators = crate::config::StatusIndicatorStyle::Animated;
+    state.sidebar_collapsed = true;
+    for endpoint in &mut state.endpoints {
+        if let Some(snapshot) = endpoint.snapshot.as_mut() {
+            for agent in &mut snapshot.agents {
+                agent.agent_status = AgentStatus::Working;
+            }
+        }
+    }
+
+    let first = state.compose(100, 8).expect("collapsed endpoint sidebar");
+    let toggle = state.hits.sidebar_toggle;
+    assert!(state
+        .hits
+        .endpoint_agents
+        .iter()
+        .any(|(rect, _, _)| contains(*rect, (toggle.x, toggle.y))));
+    assert!(!state
+        .hits
+        .animated_status_cells
+        .iter()
+        .any(|cell| contains(toggle, (cell.x, cell.y))));
+
+    let now = std::time::Instant::now();
+    state.timer_delay(now);
+    let deadline = state.next_spinner_frame.expect("spinner deadline");
+    assert!(state.tick_spinner(deadline));
+    let patch = state
+        .compose_spinner_patch(100, 8)
+        .expect("visible spinner patch");
+    let patched = apply_composed_surface_patch(&first, patch).expect("applicable spinner patch");
+    let recomposed = state.compose(100, 8).expect("advanced full frame");
+    assert_eq!(patched, recomposed);
+}
+
+#[test]
 fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
     let (mut state, remote) = state_with_scrollable_agents();
     for endpoint_id in [remote.clone(), ClientEndpointId::Local, remote] {
