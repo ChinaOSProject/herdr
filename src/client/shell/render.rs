@@ -288,66 +288,28 @@ pub(super) fn render_shell_sidebar(
     }
 }
 
-fn animated_status_visible(
-    snapshot: &ClientShellSnapshot,
-    state: &ShellRenderState<'_>,
-    hits: &ShellHitMap,
-) -> bool {
-    let working = crate::api::schema::AgentStatus::Working;
-    let empty_collapsed_groups = HashSet::new();
-    let endpoint_snapshot = |endpoint_id: &ClientEndpointId| {
-        state
-            .endpoints
-            .iter()
-            .find(|endpoint| {
-                &endpoint.endpoint_id == endpoint_id
-                    && endpoint.status == ClientEndpointStatus::Online
+pub(super) fn record_animated_status_cells(
+    buffer: &Buffer,
+    hits: &mut ShellHitMap,
+    status: crate::api::schema::AgentStatus,
+    indicators: crate::config::StatusIndicatorStyle,
+    spinner_frame: Option<usize>,
+    positions: impl IntoIterator<Item = (u16, u16)>,
+) {
+    if status != crate::api::schema::AgentStatus::Working
+        || indicators != crate::config::StatusIndicatorStyle::Animated
+        || spinner_frame.is_none()
+    {
+        return;
+    }
+    hits.animated_status_cells
+        .extend(positions.into_iter().filter_map(|(x, y)| {
+            buffer.cell((x, y)).map(|cell| ClientAnimatedStatusCell {
+                x,
+                y,
+                cell: crate::protocol::CellData::from_ratatui_cell(cell),
             })
-            .and_then(|endpoint| endpoint.snapshot.as_deref())
-    };
-    hits.workspaces.iter().any(|hit| {
-        endpoint_snapshot(&hit.endpoint_id).is_some_and(|snapshot| {
-            let collapsed_groups = if hit.endpoint_id.is_local() {
-                state.collapsed_groups
-            } else {
-                state
-                    .remote_collapsed_groups
-                    .get(&hit.endpoint_id)
-                    .unwrap_or(&empty_collapsed_groups)
-            };
-            snapshot
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id == hit.workspace_id)
-                .is_some_and(|workspace| {
-                    let status = if state.sidebar_collapsed {
-                        workspace.agent_status
-                    } else {
-                        super::sidebar::displayed_workspace_status(
-                            snapshot,
-                            workspace,
-                            collapsed_groups,
-                        )
-                    };
-                    status == working
-                })
-        })
-    }) || hits.agents.iter().any(|(_, pane_id)| {
-        snapshot
-            .agents
-            .iter()
-            .any(|agent| agent.pane_id == *pane_id && agent.agent_status == working)
-    }) || hits
-        .endpoint_agents
-        .iter()
-        .any(|(_, endpoint_id, pane_id)| {
-            endpoint_snapshot(endpoint_id).is_some_and(|snapshot| {
-                snapshot
-                    .agents
-                    .iter()
-                    .any(|agent| agent.pane_id == *pane_id && agent.agent_status == working)
-            })
-        })
+        }));
 }
 
 pub(super) fn render_shell(
@@ -389,7 +351,6 @@ pub(super) fn render_shell(
             &mut hits,
         );
     }
-    hits.animated_status_visible = animated_status_visible(snapshot, &state, &hits);
     if !config.mouse_capture {
         hits.sidebar_divider = Rect::default();
         hits.sidebar_section_divider = Rect::default();

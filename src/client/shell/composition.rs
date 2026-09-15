@@ -42,61 +42,26 @@ impl ClientShellState {
         }
         let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;
-        if snapshot.revision != surface.projection_revision {
+        if snapshot.revision != surface.projection_revision
+            || self.hits.animated_status_cells.is_empty()
+        {
             return None;
         }
-        let sidebar = self.layout(cols, rows).sidebar;
-        if sidebar.is_empty() {
-            return None;
-        }
-
-        let mut buffer = Buffer::empty(sidebar);
-        let mut hits = ShellHitMap::default();
-        let mut render_state = render::ShellRenderState {
-            endpoints: &self.endpoints,
-            active_endpoint_id: &self.active_endpoint_id,
-            collapsed_endpoints: &self.collapsed_endpoints,
-            collapsed_groups: &self.collapsed_groups,
-            remote_collapsed_groups: &self.remote_collapsed_groups,
-            workspace_scroll: &mut self.workspace_scroll,
-            agent_scroll: &mut self.agent_scroll,
-            tab_scroll: &mut self.tab_scroll,
-            reveal_focused_workspace: &mut self.reveal_focused_workspace,
-            reveal_focused_tab: &mut self.reveal_focused_tab,
-            sidebar_collapsed: self.sidebar_collapsed,
-            sidebar_section_split: self.sidebar_section_split,
-            tab_drag_insert_index: None,
-            selected_workspace_id: None,
-            reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
-            dragged_workspace_id: None,
-            workspace_drop_indicator_row: None,
-            spinner_frame: Some(self.spinner_frame),
-        };
-        render::render_shell_sidebar(
-            &mut buffer,
-            sidebar,
-            snapshot,
-            &self.config,
-            &mut render_state,
-            &mut hits,
-        );
-
-        let rows = (sidebar.y..sidebar.bottom())
-            .map(|y| {
-                let cells = (sidebar.x..sidebar.right())
-                    .map(|x| {
-                        buffer
-                            .cell((x, y))
-                            .map(crate::protocol::CellData::from_ratatui_cell)
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Some(crate::protocol::PaneSurfacePatchRow {
-                    x: sidebar.x,
-                    y,
-                    cells,
-                })
+        let symbol = STATUS_SPINNER_FRAMES.get(self.spinner_frame)?;
+        let rows = self
+            .hits
+            .animated_status_cells
+            .iter()
+            .map(|spinner| {
+                let mut cell = spinner.cell.clone();
+                cell.symbol = (*symbol).to_owned();
+                crate::protocol::PaneSurfacePatchRow {
+                    x: spinner.x,
+                    y: spinner.y,
+                    cells: vec![cell],
+                }
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect();
         Some(ClientComposedSurfacePatch {
             rows,
             cursor: None,

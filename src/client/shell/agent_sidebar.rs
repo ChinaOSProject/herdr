@@ -83,7 +83,7 @@ pub(super) fn render_agent_panel(
         |row| row.rows.len(),
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config, spinner_frame);
+            render_agent_row(buffer, rect, row, config, spinner_frame, hits);
         },
     );
 }
@@ -325,6 +325,7 @@ pub(super) fn render_agent_row(
     row: &AgentRow,
     config: &ClientShellConfig,
     spinner_frame: Option<usize>,
+    hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
     let row_style = if row.focused {
@@ -355,9 +356,11 @@ pub(super) fn render_agent_row(
     } else {
         row.rows.clone()
     };
+    let mut spinner_positions = Vec::new();
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
+        let mut state_icon_offsets = Vec::new();
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
             icon,
@@ -367,12 +370,32 @@ pub(super) fn render_agent_row(
             secondary,
             palette,
             rect.width.saturating_sub(indent as u16) as usize,
+            Some(&mut state_icon_offsets),
         ));
+        spinner_positions.extend(
+            state_icon_offsets
+                .into_iter()
+                .filter_map(|offset| u16::try_from(offset).ok())
+                .map(|offset| {
+                    (
+                        rect.x.saturating_add(indent as u16).saturating_add(offset),
+                        rect.y + index as u16,
+                    )
+                }),
+        );
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
     }
+    super::render::record_animated_status_cells(
+        buffer,
+        hits,
+        row.status,
+        config.status_indicators,
+        spinner_frame,
+        spinner_positions,
+    );
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

@@ -638,6 +638,7 @@ fn animated_status_advances_only_on_its_desktop_deadline() {
     projected.workspaces[0].agent_status = AgentStatus::Working;
     let mut config = Config::default();
     config.ui.status_indicators = Animated;
+    config.ui.sidebar.agents.rows = vec![vec![crate::config::AgentSidebarToken::StateIcon; 16]];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(projected.clone()));
     state.set_pane_surface(surface());
@@ -663,6 +664,7 @@ fn animated_status_advances_only_on_its_desktop_deadline() {
     let patch = state
         .compose_spinner_patch(106, 30)
         .expect("animated sidebar patch");
+    assert!(patch.rows.iter().all(|row| row.cells.len() == 1));
     let patched = apply_composed_surface_patch(&first, patch).expect("applicable sidebar patch");
     assert_eq!((state.workspace_scroll, state.agent_scroll), scroll_state);
     let second = full_state.compose(106, 30).expect("advanced full frame");

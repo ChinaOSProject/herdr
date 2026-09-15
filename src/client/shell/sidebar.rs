@@ -86,6 +86,14 @@ pub(crate) fn render_collapsed_sidebar(
             status_icon(status, config.status_indicators, spinner_frame),
             Style::default().fg(status_color(status, palette)),
         );
+        super::render::record_animated_status_cells(
+            buffer,
+            hits,
+            status,
+            config.status_indicators,
+            spinner_frame,
+            (rect.width > 2).then_some((rect.x + 2, rect.y)),
+        );
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
@@ -152,6 +160,14 @@ pub(crate) fn render_collapsed_sidebar(
             rect.width.saturating_sub(2),
             status_icon(agent.agent_status, config.status_indicators, spinner_frame),
             Style::default().fg(status_color(agent.agent_status, palette)),
+        );
+        super::render::record_animated_status_cells(
+            buffer,
+            hits,
+            agent.agent_status,
+            config.status_indicators,
+            spinner_frame,
+            (rect.width > 2).then_some((rect.x + 2, rect.y)),
         );
         hits.agents.push((rect, pane_id));
     }
@@ -311,7 +327,7 @@ pub(crate) fn render_sidebar(
             rect,
             workspace,
             status,
-            (config.status_indicators, state.spinner_frame),
+            (config.status_indicators, state.spinner_frame, hits),
             entry,
             rows,
             true,
@@ -643,7 +659,11 @@ pub(in crate::client::shell) fn render_workspace_rows(
     area: Rect,
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
-    indicators: (crate::config::StatusIndicatorStyle, Option<usize>),
+    indicators: (
+        crate::config::StatusIndicatorStyle,
+        Option<usize>,
+        &mut ShellHitMap,
+    ),
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
     endpoint_active: bool,
@@ -651,6 +671,8 @@ pub(in crate::client::shell) fn render_workspace_rows(
     dragged: bool,
     palette: &Palette,
 ) {
+    let (indicator_style, spinner_frame, hits) = indicators;
+    let mut spinner_positions = Vec::new();
     for (row_index, row) in rows.iter().enumerate() {
         let y = area.y + row_index as u16;
         if y >= area.bottom() {
@@ -699,10 +721,11 @@ pub(in crate::client::shell) fn render_workspace_rows(
         } else {
             palette.overlay0
         });
+        let mut state_icon_offsets = Vec::new();
         let spans = crate::ui::resolved_token_spans(
             row,
             (
-                status_icon(status, indicators.0, indicators.1),
+                status_icon(status, indicator_style, spinner_frame),
                 Style::default().fg(status_color(status, palette)),
             ),
             Style::default().fg(status_color(status, palette)),
@@ -711,6 +734,13 @@ pub(in crate::client::shell) fn render_workspace_rows(
             Style::default().fg(palette.overlay1),
             palette,
             area.right().saturating_sub(2).saturating_sub(x) as usize,
+            Some(&mut state_icon_offsets),
+        );
+        spinner_positions.extend(
+            state_icon_offsets
+                .into_iter()
+                .filter_map(|offset| u16::try_from(offset).ok())
+                .map(|offset| (x.saturating_add(offset), y)),
         );
         Paragraph::new(Line::from(spans)).render(
             Rect::new(x, y, area.right().saturating_sub(2).saturating_sub(x), 1),
@@ -734,4 +764,12 @@ pub(in crate::client::shell) fn render_workspace_rows(
             }
         }
     }
+    super::render::record_animated_status_cells(
+        buffer,
+        hits,
+        status,
+        indicator_style,
+        spinner_frame,
+        spinner_positions,
+    );
 }

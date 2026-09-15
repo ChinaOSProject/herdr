@@ -152,7 +152,7 @@ pub(super) struct ShellHitMap {
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
     pub(super) endpoint_agents: Vec<(Rect, ClientEndpointId, String)>,
-    pub(super) animated_status_visible: bool,
+    pub(super) animated_status_cells: Vec<ClientAnimatedStatusCell>,
     pub(super) agent_body: Rect,
     pub(super) agent_scrollbar: Rect,
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -194,6 +194,12 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_scrollbar: Rect,
     pub(super) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) release_notes_max_scroll: usize,
+}
+
+pub(super) struct ClientAnimatedStatusCell {
+    pub(super) x: u16,
+    pub(super) y: u16,
+    pub(super) cell: crate::protocol::CellData,
 }
 
 #[derive(Clone)]
@@ -1919,7 +1925,7 @@ impl ClientShellState {
             && self
                 .last_composed_size
                 .is_some_and(|(cols, rows)| self.layout(cols, rows).sidebar.width > 0)
-            && self.hits.animated_status_visible
+            && !self.hits.animated_status_cells.is_empty()
     }
 
     fn sync_spinner_deadline(&mut self, now: std::time::Instant) {
