@@ -34,6 +34,8 @@ impl App {
             .into_iter()
             .map(|plugin| (plugin.plugin_id.clone(), plugin))
             .collect();
+        self.state.default_spaces_sidebar_tokens =
+            default_spaces_sidebar_tokens(&self.state.installed_plugins);
     }
 
     fn refresh_installed_plugins(&mut self) -> std::io::Result<()> {
@@ -50,7 +52,10 @@ impl App {
         mutation: impl FnOnce(&mut crate::app::state::InstalledPluginRegistry) -> T,
     ) -> std::io::Result<T> {
         if !self.policy.persist_plugin_registry {
-            return Ok(mutation(&mut self.state.installed_plugins));
+            let result = mutation(&mut self.state.installed_plugins);
+            self.state.default_spaces_sidebar_tokens =
+                default_spaces_sidebar_tokens(&self.state.installed_plugins);
+            return Ok(result);
         }
         let (result, entries) = crate::persist::plugin_registry::update(|entries| {
             let mut registry = entries
@@ -742,6 +747,26 @@ impl App {
             encode_success(id, ResponseResult::PluginDisabled { plugin })
         }
     }
+
+    pub(crate) fn default_spaces_sidebar_tokens(&self) -> &[String] {
+        &self.state.default_spaces_sidebar_tokens
+    }
+}
+
+pub(crate) fn default_spaces_sidebar_tokens(
+    plugins: &crate::app::state::InstalledPluginRegistry,
+) -> Vec<String> {
+    plugins
+        .values()
+        .filter(|plugin| {
+            plugin.enabled
+                && plugin_manifest_available(plugin)
+                && ensure_platform_supported(&plugin.platforms, "plugin").is_ok()
+        })
+        .filter_map(|plugin| plugin.default_spaces_sidebar_token.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn invalid_plugin_id(id: String) -> String {
@@ -1139,6 +1164,90 @@ platforms = ["linux", "macos", "windows"]
             panic!("expected plugin list response: {list}");
         };
         assert!(plugins.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_sidebar_tokens_are_normalized_filtered_and_ordered() {
+        let root = unique_temp_path("plugin-sidebar-token");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.sidebar"
+name = "Sidebar"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos", "windows"]
+default_spaces_sidebar_token = " github_pr "
+"#,
+        );
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        assert_eq!(
+            plugin.default_spaces_sidebar_token.as_deref(),
+            Some("github_pr")
+        );
+
+        let mut app = test_app();
+        let mut duplicate = plugin.clone();
+        duplicate.plugin_id = "example.duplicate".into();
+        let mut disabled = plugin.clone();
+        disabled.plugin_id = "example.disabled".into();
+        disabled.enabled = false;
+        disabled.default_spaces_sidebar_token = Some("disabled".into());
+        let mut unavailable = plugin.clone();
+        unavailable.plugin_id = "example.unavailable".into();
+        unavailable.default_spaces_sidebar_token = Some("unavailable".into());
+        unavailable.warnings.push(format!(
+            "{}missing",
+            crate::persist::plugin_registry::MANIFEST_UNAVAILABLE_WARNING_PREFIX
+        ));
+        let mut review = plugin.clone();
+        review.plugin_id = "example.review".into();
+        review.default_spaces_sidebar_token = Some("code_review".into());
+        let mut other_platform = plugin.clone();
+        other_platform.plugin_id = "example.other-platform".into();
+        other_platform.platforms = Some(vec![if cfg!(target_os = "linux") {
+            crate::api::schema::PluginPlatform::Windows
+        } else {
+            crate::api::schema::PluginPlatform::Linux
+        }]);
+        other_platform.default_spaces_sidebar_token = Some("other_platform".into());
+        for plugin in [
+            plugin,
+            duplicate,
+            disabled,
+            unavailable,
+            review,
+            other_platform,
+        ] {
+            app.state
+                .installed_plugins
+                .insert(plugin.plugin_id.clone(), plugin);
+        }
+
+        assert_eq!(
+            default_spaces_sidebar_tokens(&app.state.installed_plugins),
+            ["code_review", "github_pr"]
+        );
+
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.sidebar"
+name = "Sidebar"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+platforms = ["linux"]
+default_spaces_sidebar_token = "$github_pr"
+"#,
+        );
+        assert_eq!(
+            load_plugin_manifest(&root.display().to_string(), true)
+                .unwrap_err()
+                .0,
+            "invalid_plugin_sidebar_token"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

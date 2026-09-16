@@ -31,6 +31,8 @@ struct RawPluginManifest {
     panes: Vec<RawPluginManifestPane>,
     #[serde(default)]
     link_handlers: Vec<RawPluginManifestLinkHandler>,
+    #[serde(default)]
+    default_spaces_sidebar_token: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -152,6 +154,21 @@ pub(crate) fn load_plugin_manifest(
         .description
         .map(|description| description.trim().to_string())
         .filter(|description| !description.is_empty());
+    let default_spaces_sidebar_token = raw
+        .default_spaces_sidebar_token
+        .map(|token| {
+            let token = token.trim().to_string();
+            crate::metadata_tokens::valid_key(&token)
+                .then_some(token)
+                .ok_or_else(|| {
+                    (
+                        "invalid_plugin_sidebar_token",
+                        "default_spaces_sidebar_token must be a workspace metadata token name"
+                            .to_string(),
+                    )
+                })
+        })
+        .transpose()?;
     let platforms = normalize_platforms(raw.platforms)?;
     let build = raw
         .build
@@ -219,6 +236,7 @@ pub(crate) fn load_plugin_manifest(
         events,
         panes,
         link_handlers,
+        default_spaces_sidebar_token,
         source: Default::default(),
         warnings,
     })

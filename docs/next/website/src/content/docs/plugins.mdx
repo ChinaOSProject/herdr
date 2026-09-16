@@ -64,6 +64,7 @@ version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Apply project layouts"
 platforms = ["linux", "macos", "windows"]
+default_spaces_sidebar_token = "github_pr"
 
 [[build]]
 command = ["npm", "ci"]
@@ -104,6 +105,19 @@ APIs, event names, and manifest fields your plugin uses. Herdr refuses to link
 or install a plugin when its minimum version is newer than the current binary.
 `description` is optional. Plugin ids may use ASCII letters, digits, dot,
 colon, underscore, and hyphen.
+
+`default_spaces_sidebar_token` optionally names one workspace metadata token
+that the plugin wants shown with Herdr's default Spaces sidebar layout. The
+plugin reports the value normally, for example with
+`herdr workspace report-metadata ... --token github_pr=...`; Herdr places it
+after branch and Git status. On an indented worktree, where those Git details
+are hidden, the value uses its own row. Missing values, disabled plugins, and
+uninstalled plugins, and plugins unsupported on this host add nothing.
+Contributions are ordered by token name and duplicates are removed.
+
+This default applies only while `[ui.sidebar.spaces].rows` is omitted. An
+explicit row layout remains authoritative, including one equal to Herdr's
+built-in rows; add `$github_pr` to that layout when you want the token there.
 
 Action ids, pane ids, and link handler ids are local ids inside the plugin.
 They may use ASCII letters, digits, colon, underscore, and hyphen, but not

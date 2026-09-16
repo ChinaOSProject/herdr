@@ -132,13 +132,15 @@ pub(crate) struct SpaceTokenContext<'a> {
 
 pub(crate) fn space_rows(
     config: &SpacesSidebarConfig,
+    default_tokens: &[String],
     context: SpaceTokenContext<'_>,
 ) -> Vec<Vec<ResolvedToken>> {
     config
         .rows
         .iter()
-        .filter_map(|row| {
-            let resolved = row
+        .enumerate()
+        .filter_map(|(row_index, row)| {
+            let mut resolved = row
                 .iter()
                 .filter_map(|configured| {
                     let (token, style) = configured.parts();
@@ -172,6 +174,16 @@ pub(crate) fn space_rows(
                     Some(ResolvedToken::new(kind, style))
                 })
                 .collect::<Vec<_>>();
+            if !config.rows_configured && row_index == 1 {
+                resolved.extend(default_tokens.iter().filter_map(|name| {
+                    context.tokens.get(name).cloned().map(|value| {
+                        ResolvedToken::new(
+                            ResolvedTokenKind::Custom(value),
+                            SidebarTokenStyle::default(),
+                        )
+                    })
+                }));
+            }
             (!resolved.is_empty()).then_some(resolved)
         })
         .collect()
@@ -325,6 +337,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, dim = true }] }]]
             assert_eq!(rows[0][0].style.dim, dim);
             let spaces = space_rows(
                 &config.spaces,
+                &[],
                 SpaceTokenContext {
                     workspace: "repo",
                     branch: None,
@@ -374,6 +387,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
             );
             let rows = space_rows(
                 &config.spaces,
+                &[],
                 SpaceTokenContext {
                     workspace: "repo",
                     branch: None,
@@ -543,6 +557,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
         assert_eq!(
             space_rows(
                 &config,
+                &[],
                 SpaceTokenContext {
                     workspace: "feature",
                     branch: Some("worktree/feature"),
@@ -570,6 +585,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
         assert_eq!(
             space_rows(
                 &config,
+                &[],
                 SpaceTokenContext {
                     workspace: "repo",
                     branch: None,
@@ -582,6 +598,66 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Custom(
                 "2 changes".into()
             ))]]
+        );
+    }
+
+    #[test]
+    fn plugin_defaults_extend_only_implicit_space_rows() {
+        let tokens = std::collections::HashMap::from([("github_pr".into(), "PR #42".into())]);
+        let defaults = vec!["github_pr".into(), "missing".into()];
+        let config = SpacesSidebarConfig::default();
+        let rows = |suppress_git_details| {
+            space_rows(
+                &config,
+                &defaults,
+                SpaceTokenContext {
+                    workspace: "repo",
+                    branch: Some("feature"),
+                    state_text: "idle",
+                    ahead_behind: Some((1, 0)),
+                    tokens: &tokens,
+                    suppress_git_details,
+                },
+            )
+        };
+
+        assert_eq!(
+            rows(false)[1],
+            vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::Branch("feature".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::GitStatus {
+                    ahead: 1,
+                    behind: 0,
+                }),
+                ResolvedToken::unstyled(ResolvedTokenKind::Custom("PR #42".into())),
+            ]
+        );
+        assert_eq!(
+            rows(true)[1],
+            vec![ResolvedToken::unstyled(ResolvedTokenKind::Custom(
+                "PR #42".into()
+            ))]
+        );
+
+        let explicit: SpacesSidebarConfig =
+            toml::from_str(r#"rows = [["state_icon", "workspace"], ["branch", "git_status"]]"#)
+                .unwrap();
+        assert!(explicit.rows_configured);
+        assert_eq!(
+            space_rows(
+                &explicit,
+                &defaults,
+                SpaceTokenContext {
+                    workspace: "repo",
+                    branch: None,
+                    state_text: "idle",
+                    ahead_behind: None,
+                    tokens: &tokens,
+                    suppress_git_details: false,
+                },
+            )
+            .len(),
+            1
         );
     }
 }

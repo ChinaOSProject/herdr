@@ -2033,6 +2033,8 @@ impl HeadlessServer {
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
                 let agent_view = self.app.state.agent_view_override.clone();
+                let default_spaces_sidebar_tokens =
+                    self.app.default_spaces_sidebar_tokens().to_vec();
                 let projection_message = match agent_view.as_ref() {
                     Some(view) => match crate::protocol::endpoint::agent_view_projection_message(
                         &seed_snapshot.boot_id,
@@ -2055,14 +2057,33 @@ impl HeadlessServer {
                             return false;
                         }
                     };
+                let sidebar_tokens_message = if default_spaces_sidebar_tokens.is_empty() {
+                    None
+                } else {
+                    match crate::protocol::endpoint::default_spaces_sidebar_tokens_message(
+                        &seed_snapshot.boot_id,
+                        seed_snapshot.revision,
+                        &default_spaces_sidebar_tokens,
+                    ) {
+                        Ok(message) => Some(message),
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to encode endpoint sidebar tokens");
+                            return false;
+                        }
+                    }
+                };
                 connection.shell_location = Some(location);
                 connection.shell_snapshot = Some(seed_snapshot);
                 connection.shell_agent_view = agent_view;
+                connection.shell_default_spaces_sidebar_tokens = default_spaces_sidebar_tokens;
                 self.clients.insert(client_id, connection);
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
                 }
                 if let Some(message) = projection_message {
+                    self.send_to_client(client_id, message);
+                }
+                if let Some(message) = sidebar_tokens_message {
                     self.send_to_client(client_id, message);
                 }
                 self.send_to_client(client_id, snapshot_message);

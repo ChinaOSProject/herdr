@@ -7572,6 +7572,12 @@
               },
               "type": "array"
             },
+            "default_spaces_sidebar_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "description": {
               "type": [
                 "string",

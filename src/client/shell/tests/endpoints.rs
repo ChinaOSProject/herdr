@@ -73,6 +73,48 @@ fn state_with_remote() -> (ClientShellState, ClientEndpointId) {
     (state, endpoint_id)
 }
 
+#[test]
+fn remote_sidebar_uses_revision_bound_plugin_defaults() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let profile = remote_profile();
+    let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_default_spaces_sidebar_tokens_for_generation(
+        &endpoint_id,
+        7,
+        crate::protocol::endpoint::EndpointDefaultSpacesSidebarTokens {
+            boot_id: "remote-boot".into(),
+            revision: 2,
+            tokens: vec!["github_pr".into()],
+        },
+    );
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.revision = 2;
+    remote.workspaces[0]
+        .tokens
+        .push(("github_pr".into(), "PR #42".into()));
+    state.cache_endpoint_snapshot_for_generation(&endpoint_id, 7, Box::new(remote));
+
+    let endpoint = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+        .unwrap();
+    let snapshot = endpoint.snapshot.as_deref().unwrap();
+    let rows = super::super::sidebar::workspace_rows(
+        &snapshot.workspaces[0],
+        AgentStatus::Idle,
+        false,
+        &state.config.spaces,
+        ClientShellState::endpoint_default_spaces_sidebar_tokens(endpoint),
+    );
+    assert!(matches!(
+        rows[1].last().map(|token| &token.kind),
+        Some(crate::ui::ResolvedTokenKind::Custom(value)) if value == "PR #42"
+    ));
+}
+
 fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
     let (mut state, remote) = state_with_remote();
     for endpoint_id in [ClientEndpointId::Local, remote.clone()] {

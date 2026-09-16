@@ -29,6 +29,7 @@ pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
+pub const DEFAULT_SPACES_SIDEBAR_TOKENS_KIND: &str = "endpoint.default-spaces-sidebar-tokens.v1";
 
 fn default_true() -> bool {
     true
@@ -79,6 +80,14 @@ pub struct EndpointAgentViewProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointDefaultSpacesSidebarTokens {
+    pub boot_id: String,
+    pub revision: u64,
+    #[serde(default)]
+    pub tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointServerWelcome {
     pub generation: u32,
     pub server_version: String,
@@ -114,6 +123,21 @@ pub fn agent_view_projection_message(
     Ok(ServerMessage::EndpointControl {
         kind: AGENT_VIEW_PROJECTION_KIND.into(),
         data: serde_json::to_string(&projection)?,
+    })
+}
+
+pub fn default_spaces_sidebar_tokens_message(
+    boot_id: &str,
+    revision: u64,
+    tokens: &[String],
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: DEFAULT_SPACES_SIDEBAR_TOKENS_KIND.into(),
+        data: serde_json::to_string(&EndpointDefaultSpacesSidebarTokens {
+            boot_id: boot_id.to_owned(),
+            revision,
+            tokens: tokens.to_vec(),
+        })?,
     })
 }
 
@@ -306,6 +330,28 @@ mod tests {
                 .transpose()
                 .unwrap(),
             Some(view)
+        );
+    }
+
+    #[test]
+    fn sidebar_tokens_are_an_optional_revision_bound_control() {
+        let message = default_spaces_sidebar_tokens_message(
+            "boot",
+            7,
+            &["github_pr".into(), "review".into()],
+        )
+        .unwrap();
+        let ServerMessage::EndpointControl { kind, data } = message else {
+            panic!("sidebar token control");
+        };
+        assert_eq!(kind, DEFAULT_SPACES_SIDEBAR_TOKENS_KIND);
+        assert_eq!(
+            serde_json::from_str::<EndpointDefaultSpacesSidebarTokens>(&data).unwrap(),
+            EndpointDefaultSpacesSidebarTokens {
+                boot_id: "boot".into(),
+                revision: 7,
+                tokens: vec!["github_pr".into(), "review".into()],
+            }
         );
     }
 

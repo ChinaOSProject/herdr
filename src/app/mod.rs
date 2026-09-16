@@ -443,6 +443,9 @@ impl App {
         let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
+        let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
+        let default_spaces_sidebar_tokens =
+            api::plugins::default_spaces_sidebar_tokens(&installed_plugins);
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
@@ -516,7 +519,8 @@ impl App {
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
-            installed_plugins: load_plugin_registry(policy.persist_plugin_registry),
+            installed_plugins,
+            default_spaces_sidebar_tokens,
             plugin_panes: std::collections::HashMap::new(),
             popup_pane: None,
             plugin_command_logs: Vec::new(),

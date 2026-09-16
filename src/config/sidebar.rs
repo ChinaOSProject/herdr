@@ -455,12 +455,11 @@ impl Default for AgentsSidebarConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpacesSidebarConfig {
-    #[serde(deserialize_with = "deserialize_sidebar_rows")]
     pub rows: SpaceSidebarRows,
     pub row_gap: u16,
+    pub(crate) rows_configured: bool,
 }
 
 impl Default for SpacesSidebarConfig {
@@ -471,7 +470,48 @@ impl Default for SpacesSidebarConfig {
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            rows_configured: false,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for SpacesSidebarConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Raw {
+            rows: Option<SpaceSidebarRows>,
+            row_gap: u16,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if let Some(rows) = &raw.rows {
+            validate_sidebar_rows(rows).map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self {
+            rows_configured: raw.rows.is_some(),
+            rows: raw.rows.unwrap_or_else(|| Self::default().rows),
+            row_gap: raw.row_gap,
+        })
+    }
+}
+
+impl Serialize for SpacesSidebarConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("SpacesSidebarConfig", 2)?;
+        if self.rows_configured {
+            state.serialize_field("rows", &self.rows)?;
+        }
+        state.serialize_field("row_gap", &self.row_gap)?;
+        state.end()
     }
 }
 
@@ -511,6 +551,7 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+        assert!(!config.spaces.rows_configured);
     }
 
     #[test]
@@ -563,6 +604,7 @@ row_gap = 3
             vec![SpaceSidebarToken::Custom("jj_status".into())]
         );
         assert_eq!(config.ui.sidebar.spaces.row_gap, 3);
+        assert!(config.ui.sidebar.spaces.rows_configured);
     }
 
     #[test]

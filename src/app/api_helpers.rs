@@ -204,7 +204,6 @@ pub(super) const METADATA_SOURCE_MAX_CHARS: usize = 80;
 const METADATA_TTL_MIN_MS: u64 = 1;
 const MAX_METADATA_TOKEN_KEYS_PER_REQUEST: usize = 16;
 pub(super) const MAX_METADATA_TOKEN_KEYS_PER_RESOURCE: usize = 32;
-const MAX_METADATA_TOKEN_KEY_LEN: usize = 32;
 const MAX_METADATA_TOKEN_VALUE_LEN: usize = 80;
 
 pub(super) fn normalize_metadata_source(value: String) -> Result<String, &'static str> {
@@ -256,12 +255,7 @@ pub(super) fn normalize_metadata_tokens(
     tokens
         .into_iter()
         .map(|(key, value)| {
-            if key.is_empty()
-                || key.len() > MAX_METADATA_TOKEN_KEY_LEN
-                || !key
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-            {
+            if !crate::metadata_tokens::valid_key(&key) {
                 return Err(format!("invalid metadata token key: {key}"));
             }
             let value = value.and_then(|value| {
@@ -300,7 +294,7 @@ mod metadata_token_tests {
     fn token_normalization_rejects_invalid_or_unbounded_keys() {
         for key in [
             "bad.name".to_string(),
-            "x".repeat(MAX_METADATA_TOKEN_KEY_LEN + 1),
+            "x".repeat(crate::metadata_tokens::MAX_KEY_LEN + 1),
         ] {
             assert!(normalize_metadata_tokens(std::collections::HashMap::from([(
                 key,

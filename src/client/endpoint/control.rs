@@ -9,6 +9,7 @@ pub(crate) struct DecodedAgentViewProjection {
 pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
+    DefaultSpacesSidebarTokens(crate::protocol::endpoint::EndpointDefaultSpacesSidebarTokens),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Ignored,
 }
@@ -45,6 +46,24 @@ pub(crate) fn decode_endpoint_control(
                 revision: projection.revision,
                 view,
             },
+        ));
+    }
+    if kind == crate::protocol::endpoint::DEFAULT_SPACES_SIDEBAR_TOKENS_KIND {
+        let Ok(mut projection): Result<
+            crate::protocol::endpoint::EndpointDefaultSpacesSidebarTokens,
+            _,
+        > = serde_json::from_str(data) else {
+            return Ok(EndpointControlMessage::Ignored);
+        };
+        projection.tokens = projection
+            .tokens
+            .into_iter()
+            .filter(|token| crate::metadata_tokens::valid_key(token))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        return Ok(EndpointControlMessage::DefaultSpacesSidebarTokens(
+            projection,
         ));
     }
     if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
@@ -132,6 +151,27 @@ mod tests {
             .unwrap(),
             EndpointControlMessage::Ignored
         ));
+    }
+
+    #[test]
+    fn sidebar_tokens_decode_deterministically() {
+        let message = crate::protocol::endpoint::default_spaces_sidebar_tokens_message(
+            "boot",
+            3,
+            &["review".into(), "github_pr".into(), "review".into()],
+        )
+        .unwrap();
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } = message else {
+            panic!("sidebar token control");
+        };
+        let EndpointControlMessage::DefaultSpacesSidebarTokens(decoded) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("decoded sidebar tokens");
+        };
+        assert_eq!(decoded.boot_id, "boot");
+        assert_eq!(decoded.revision, 3);
+        assert_eq!(decoded.tokens, ["github_pr", "review"]);
     }
 
     #[test]

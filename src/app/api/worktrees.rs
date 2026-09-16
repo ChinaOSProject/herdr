@@ -867,6 +867,7 @@ mod tests {
                 }],
                 panes: Vec::new(),
                 link_handlers: Vec::new(),
+                default_spaces_sidebar_token: None,
                 source: crate::api::schema::PluginSourceInfo::default(),
                 warnings: Vec::new(),
             },

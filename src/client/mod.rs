@@ -1899,6 +1899,19 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::DefaultSpacesSidebarTokens(
+                                projection,
+                            )) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell
+                                        .set_endpoint_default_spaces_sidebar_tokens_for_generation(
+                                            &endpoint_id,
+                                            generation,
+                                            projection,
+                                        );
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;

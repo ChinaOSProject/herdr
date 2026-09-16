@@ -1723,6 +1723,7 @@ mod tests {
             events: vec![],
             panes: vec![],
             link_handlers: vec![],
+            default_spaces_sidebar_token: None,
             source: PluginSourceInfo {
                 kind: PluginSourceKind::Github,
                 owner: Some(owner.to_string()),

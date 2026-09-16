@@ -1029,6 +1029,7 @@ fn plugin_link_list_unlink_round_trip() {
             action: "bootstrap".into(),
             platforms: None,
         }],
+        default_spaces_sidebar_token: Some("github_pr".into()),
         source: Default::default(),
         warnings: vec![],
     };

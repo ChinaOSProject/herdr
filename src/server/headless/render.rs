@@ -498,7 +498,14 @@ impl HeadlessServer {
                 candidate.revision = client.shell_projection_revision;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_view != agent_view
+                    || client.shell_default_spaces_sidebar_tokens
+                        != self.app.default_spaces_sidebar_tokens()
                 {
+                    let send_sidebar_tokens =
+                        !client.shell_default_spaces_sidebar_tokens.is_empty()
+                            || !self.app.default_spaces_sidebar_tokens().is_empty();
+                    let default_spaces_sidebar_tokens =
+                        self.app.default_spaces_sidebar_tokens().to_vec();
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
                     candidate.revision = client.shell_projection_revision;
@@ -529,6 +536,22 @@ impl HeadlessServer {
                                 continue;
                             }
                         };
+                    let sidebar_tokens_message = if send_sidebar_tokens {
+                        match crate::protocol::endpoint::default_spaces_sidebar_tokens_message(
+                            &candidate.boot_id,
+                            candidate.revision,
+                            &default_spaces_sidebar_tokens,
+                        ) {
+                            Ok(message) => Some(message),
+                            Err(err) => {
+                                warn!(client_id, err = %err, "failed to encode endpoint sidebar tokens");
+                                broken_clients.push(client_id);
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let projection_framed = match projection_message
                         .as_ref()
                         .map(Self::frame_server_message)
@@ -549,11 +572,25 @@ impl HeadlessServer {
                             continue;
                         }
                     };
+                    let sidebar_tokens_framed = match sidebar_tokens_message
+                        .as_ref()
+                        .map(Self::frame_server_message)
+                        .transpose()
+                    {
+                        Ok(framed) => framed,
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to frame endpoint sidebar tokens");
+                            broken_clients.push(client_id);
+                            continue;
+                        }
+                    };
                     let Some(writer) = client.writer.as_ref() else {
                         broken_clients.push(client_id);
                         continue;
                     };
                     if projection_framed.is_some_and(|framed| writer.control.send(framed).is_err())
+                        || sidebar_tokens_framed
+                            .is_some_and(|framed| writer.control.send(framed).is_err())
                         || writer.control.send(snapshot_framed).is_err()
                     {
                         broken_clients.push(client_id);
@@ -561,6 +598,7 @@ impl HeadlessServer {
                     }
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_view = agent_view;
+                    client.shell_default_spaces_sidebar_tokens = default_spaces_sidebar_tokens;
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {
