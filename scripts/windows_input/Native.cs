@@ -143,6 +143,7 @@ namespace HerdrInputGauntlet {
         }
 
         public static uint SetEmptyClipboard(IntPtr owner,string text) {
+            if(owner==IntPtr.Zero) throw new Exception("Clipboard owner is required");
             if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; refusing replacement");
             IntPtr memory=IntPtr.Zero;
             try {
@@ -156,13 +157,7 @@ namespace HerdrInputGauntlet {
                 if(!EmptyClipboard() || SetClipboardData(13,memory)==IntPtr.Zero) throw new Exception("Clipboard write failed");
                 memory=IntPtr.Zero; // ownership transferred to Windows
             } finally { if(memory!=IntPtr.Zero) GlobalFree(memory); CloseClipboard(); }
-            // Closing can synthesize additional formats and advance the sequence.
-            // Reopen before adopting it so another writer cannot become our lease.
-            if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; cannot establish test ownership");
-            try {
-                if(owner==IntPtr.Zero || GetClipboardOwner()!=owner) throw new Exception("Clipboard ownership changed; refusing cleanup lease");
-                return GetClipboardSequenceNumber();
-            } finally { CloseClipboard(); }
+            return AdoptClipboardLease(owner);
         }
         public static uint SetEmptyClipboardImage(IntPtr owner,string text) {
             if(owner==IntPtr.Zero) throw new Exception("Clipboard owner is required");
@@ -198,15 +193,28 @@ namespace HerdrInputGauntlet {
                 if(textMemory!=IntPtr.Zero) GlobalFree(textMemory);
                 CloseClipboard();
             }
-            if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; cannot establish test ownership");
-            try {
-                if(owner==IntPtr.Zero || GetClipboardOwner()!=owner) throw new Exception("Clipboard ownership changed; refusing cleanup lease");
-                return GetClipboardSequenceNumber();
-            } finally { CloseClipboard(); }
+            return AdoptClipboardLease(owner);
         }
-        public static bool ClearOwnedClipboard(uint sequence) {
+        static uint AdoptClipboardLease(IntPtr owner) {
+            // Closing can synthesize additional formats and advance the sequence.
+            uint sequence=GetClipboardSequenceNumber();
+            try {
+                if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; cannot establish test ownership");
+                try {
+                    if(GetClipboardOwner()!=owner || GetClipboardSequenceNumber()!=sequence)
+                        throw new Exception("Clipboard ownership changed; refusing cleanup lease");
+                    return sequence;
+                } finally { CloseClipboard(); }
+            } catch(Exception error) {
+                if(!ClearOwnedClipboard(owner,sequence))
+                    throw new Exception("Could not clean clipboard after ownership verification failed",error);
+                throw;
+            }
+        }
+        public static bool ClearOwnedClipboard(IntPtr owner,uint sequence) {
+            if(owner==IntPtr.Zero) return false;
             if(!OpenClipboard(IntPtr.Zero)) return false;
-            try { return GetClipboardSequenceNumber()!=sequence || EmptyClipboard(); }
+            try { return GetClipboardSequenceNumber()!=sequence || GetClipboardOwner()!=owner || EmptyClipboard(); }
             finally { CloseClipboard(); }
         }
         public static string Title(IntPtr hwnd) { var text=new StringBuilder(1024); GetWindowText(hwnd,text,text.Capacity); return text.ToString(); }

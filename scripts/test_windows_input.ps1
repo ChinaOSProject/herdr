@@ -352,7 +352,7 @@ try {
                             if ($captureTrace.Contains('transport=win32-serialized')) { $row.input_transport = 'win32-serialized' }
                         }
                         if ($null -ne $clipboardSequence) {
-                            if (-not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($clipboardSequence)) { throw 'Could not clear test-owned clipboard' }
+                            if (-not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($window, $clipboardSequence)) { throw 'Could not clear test-owned clipboard' }
                             $clipboardSequence = $null
                         }
                         if ($mouseReporting) { $null = Observer-Request $plan 'mouse-off'; $mouseReporting = $false }
@@ -374,7 +374,7 @@ try {
                 if ($null -ne $cursorPosition -and [HerdrInputGauntlet.Desktop]::GetForegroundWindow() -eq $window) {
                     [HerdrInputGauntlet.Desktop]::RestoreCursor($cursorPosition); $cursorPosition = $null
                 }
-                if ($null -ne $clipboardSequence -and -not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($clipboardSequence)) { $document.cleanup_errors += 'Could not clear test-owned clipboard' }
+                if ($null -ne $clipboardSequence -and -not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($window, $clipboardSequence)) { $document.cleanup_errors += 'Could not clear test-owned clipboard' }
                 [IO.File]::WriteAllText((Join-Path $work 'probe-stop'), '')
                 if (Test-Path (Join-Path $work 'ready.json')) {
                     try {
