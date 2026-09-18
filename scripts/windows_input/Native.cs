@@ -115,6 +115,7 @@ namespace HerdrInputGauntlet {
         [DllImport("user32.dll")] static extern bool CloseClipboard();
         [DllImport("user32.dll")] static extern bool EmptyClipboard();
         [DllImport("user32.dll")] static extern IntPtr SetClipboardData(uint format,IntPtr value);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string format);
         [DllImport("kernel32.dll")] static extern IntPtr GlobalAlloc(uint flags,UIntPtr size);
         [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr memory);
         [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
@@ -157,6 +158,45 @@ namespace HerdrInputGauntlet {
             } finally { if(memory!=IntPtr.Zero) GlobalFree(memory); CloseClipboard(); }
             // Closing can synthesize additional formats and advance the sequence.
             // Reopen before adopting it so another writer cannot become our lease.
+            if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; cannot establish test ownership");
+            try {
+                if(owner==IntPtr.Zero || GetClipboardOwner()!=owner) throw new Exception("Clipboard ownership changed; refusing cleanup lease");
+                return GetClipboardSequenceNumber();
+            } finally { CloseClipboard(); }
+        }
+        public static uint SetEmptyClipboardImage(IntPtr owner,string text) {
+            if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; refusing replacement");
+            IntPtr pngMemory=IntPtr.Zero,textMemory=IntPtr.Zero;
+            bool complete=false;
+            try {
+                if(CountClipboardFormats()!=0) throw new Exception("Clipboard changed or contains user data; refusing replacement");
+                byte[] png=Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY/jPwPAfAAUAAf+mXJtdAAAAAElFTkSuQmCC");
+                pngMemory=GlobalAlloc(2,new UIntPtr((uint)png.Length));
+                if(pngMemory==IntPtr.Zero) throw new Exception("Clipboard allocation failed");
+                var pointer=GlobalLock(pngMemory);
+                if(pointer==IntPtr.Zero) throw new Exception("Clipboard allocation failed");
+                try { Marshal.Copy(png,0,pointer,png.Length); } finally { GlobalUnlock(pngMemory); }
+                if(!EmptyClipboard()) throw new Exception("Clipboard clear failed");
+                uint pngFormat=RegisterClipboardFormat("PNG");
+                if(pngFormat==0 || SetClipboardData(pngFormat,pngMemory)==IntPtr.Zero) throw new Exception("Clipboard image write failed");
+                pngMemory=IntPtr.Zero;
+                if(text!=null) {
+                    byte[] data=Encoding.Unicode.GetBytes(text+"\0");
+                    textMemory=GlobalAlloc(2,new UIntPtr((uint)data.Length));
+                    if(textMemory==IntPtr.Zero) throw new Exception("Clipboard allocation failed");
+                    pointer=GlobalLock(textMemory);
+                    if(pointer==IntPtr.Zero) throw new Exception("Clipboard allocation failed");
+                    try { Marshal.Copy(data,0,pointer,data.Length); } finally { GlobalUnlock(textMemory); }
+                    if(SetClipboardData(13,textMemory)==IntPtr.Zero) throw new Exception("Clipboard text write failed");
+                    textMemory=IntPtr.Zero;
+                }
+                complete=true;
+            } finally {
+                if(!complete) EmptyClipboard();
+                if(pngMemory!=IntPtr.Zero) GlobalFree(pngMemory);
+                if(textMemory!=IntPtr.Zero) GlobalFree(textMemory);
+                CloseClipboard();
+            }
             if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; cannot establish test ownership");
             try {
                 if(owner==IntPtr.Zero || GetClipboardOwner()!=owner) throw new Exception("Clipboard ownership changed; refusing cleanup lease");
