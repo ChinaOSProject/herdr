@@ -88,8 +88,13 @@ pub(super) fn render_expanded(
 }
 
 impl ClientShellState {
-    pub(super) fn reveal_endpoint_agent(&mut self, endpoint_id: &ClientEndpointId, pane_id: &str) {
-        if self.hits.agent_body.is_empty() {
+    pub(super) fn reveal_endpoint_agent(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        pane_id: &str,
+        body_height: u16,
+    ) {
+        if body_height == 0 {
             return;
         }
         let rows = agent_rows(&self.endpoints, &self.active_endpoint_id, &self.config);
@@ -110,7 +115,7 @@ impl ClientShellState {
         self.agent_scroll = super::scroll::list_scroll_start_to_reveal(
             &heights,
             &gaps,
-            self.hits.agent_body.height,
+            body_height,
             self.agent_scroll,
             target,
         );
