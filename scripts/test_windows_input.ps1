@@ -333,6 +333,15 @@ try {
                         if ($case.kind -eq 'mode-transitions') { $null = Observer-Request $plan 'set-mode' $mode }
                         $row.capture_id = $end.id
                         $row.hex = $end.hex; $row.records = $end.records; $row.error = $end.error; $row.complete = $end.quiet_reached
+                        if ($case.kind -eq 'clipboard-image' -and $path -eq 'herdr-remote') {
+                            $capture = [Convert]::FromHexString([string]$end.hex)
+                            if ($capture.Length -ge 12) {
+                                $stagedPath = [Text.Encoding]::UTF8.GetString($capture, 6, $capture.Length - 12)
+                                if (Test-Path -LiteralPath $stagedPath -PathType Leaf) {
+                                    $row.staged_image_sha256 = (Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256).Hash
+                                }
+                            }
+                        }
                         $row.final_outer_geometry = (Outer-State $plan).geometry
                         $row.status = 'observed'; $row.final_pane_geometry = $end.geometry
                         if ($path -in @('herdr', 'herdr-remote') -and (Test-Path -LiteralPath $plan.input_trace)) {

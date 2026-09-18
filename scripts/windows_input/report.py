@@ -79,7 +79,9 @@ def catalogue():
     ]:
         cases.append(dict(id=name, kind="paste", text=text, expected={mode: {"paste": text} for mode in MODES[1:]}))
     cases.append(dict(id="clipboard-image", kind="clipboard-image",
-                      expected={mode: {"clipboard_image": True} for mode in MODES[1:]}))
+                      expected={mode: {"clipboard_image": True,
+                                       "sha256": "4BA8D4FD5AB42544FEEFF22D50E84412502433CC95952FD1DF9A5293588DDBEA"}
+                                for mode in MODES[1:]}))
     cases.append(dict(id="clipboard-mixed", kind="clipboard-mixed", text="clipboard text wins",
                       expected={mode: {"paste": "clipboard text wins"} for mode in MODES[1:]}))
     cases.append(dict(id="mouse-interleave", kind="mouse-interleave", text="mouse\npaste",
@@ -223,8 +225,11 @@ def verdict(case, mode, evidence):
         except UnicodeDecodeError:
             return "fail", "Staged clipboard image path is not UTF-8"
         valid_path = re.fullmatch(r"[A-Za-z]:\\.*\\herdr-clipboard-images-[^\\]+\\[^\\]+\.png", path)
-        return (("pass", "Image-only clipboard was staged and its path reached the pane") if valid_path else
-                ("fail", "Pane did not receive a staged clipboard PNG path"))
+        if not valid_path:
+            return "fail", "Pane did not receive a staged clipboard PNG path"
+        return (("pass", "Exact clipboard PNG was staged and its path reached the pane")
+                if evidence.get("staged_image_sha256") == expected["sha256"] else
+                ("fail", "Staged clipboard image contents differ from the fixture"))
     if expected.get("mouse_interleave"):
         motion = rb"(?:\x1b\[<35;\d+;\d+M)+"
         newline = rb"(?:\r\n|\r|\n)"

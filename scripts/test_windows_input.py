@@ -94,7 +94,10 @@ class WindowsInputGauntletTests(unittest.TestCase):
         empty_paste = b"\x1b[200~\x1b[201~"
         staged = b"\x1b[200~C:\\Temp\\herdr-clipboard-images-user\\image.png\x1b[201~"
         self.assertEqual(verdict(case, "legacy", {**self.evidence, "path": "direct", "hex": empty_paste.hex()})[0], "pass")
-        self.assertEqual(verdict(case, "legacy", {**self.evidence, "path": "herdr-remote", "hex": staged.hex()})[0], "pass")
+        remote = {**self.evidence, "path": "herdr-remote", "hex": staged.hex(),
+                  "staged_image_sha256": case["expected"]["legacy"]["sha256"]}
+        self.assertEqual(verdict(case, "legacy", remote)[0], "pass")
+        self.assertEqual(verdict(case, "legacy", {**remote, "staged_image_sha256": "0" * 64})[0], "fail")
         self.assertEqual(verdict(case, "legacy", {**self.evidence, "path": "herdr-remote", "hex": empty_paste.hex()})[0], "fail")
         self.assertEqual(verdict(case, "legacy", {**self.evidence, "path": "herdr", "hex": empty_paste.hex()})[0], "not_run")
 

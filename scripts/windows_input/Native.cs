@@ -165,6 +165,7 @@ namespace HerdrInputGauntlet {
             } finally { CloseClipboard(); }
         }
         public static uint SetEmptyClipboardImage(IntPtr owner,string text) {
+            if(owner==IntPtr.Zero) throw new Exception("Clipboard owner is required");
             if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; refusing replacement");
             IntPtr pngMemory=IntPtr.Zero,textMemory=IntPtr.Zero;
             bool complete=false;
