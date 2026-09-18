@@ -203,6 +203,7 @@ impl ClientShellState {
                 _ => unreachable!("endpoint agent navigation"),
             };
             let target = &agents[next];
+            self.reveal_endpoint_agent(&target.endpoint_id, &target.pane_id);
             self.focus_or_activate(
                 target.endpoint_id.clone(),
                 ClientEndpointFocusTarget::Pane(target.pane_id.clone()),

@@ -110,6 +110,72 @@ fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
 }
 
 #[test]
+fn agent_navigation_reveals_offscreen_targets() {
+    use crate::input::KeybindAction;
+
+    for action in [
+        KeybindAction::NextAgent,
+        KeybindAction::PreviousAgent,
+        KeybindAction::FocusAgent(0),
+    ] {
+        let (mut state, remote) = state_with_scrollable_agents();
+        let (endpoint_id, pane_id) = match action {
+            KeybindAction::NextAgent => (ClientEndpointId::Local, "pane_2"),
+            KeybindAction::PreviousAgent => (remote, "pane_8"),
+            _ => (ClientEndpointId::Local, "pane_1"),
+        };
+        state.agent_scroll = if action == KeybindAction::PreviousAgent {
+            0
+        } else {
+            state.hits.agent_max_scroll
+        };
+        state.compose(100, 28).unwrap();
+        assert!(!state
+            .hits
+            .endpoint_agents
+            .iter()
+            .any(|(_, endpoint, pane)| { endpoint == &endpoint_id && pane == pane_id }));
+
+        let mut outcome = ClientShellInput::default();
+        assert!(state.handle_endpoint_navigation(action, &mut outcome));
+        if endpoint_id != state.active_endpoint_id {
+            assert!(state.activate_endpoint_projection(&endpoint_id));
+        }
+        state.compose(100, 28).unwrap();
+        assert!(
+            state
+                .hits
+                .endpoint_agents
+                .iter()
+                .any(|(_, endpoint, pane)| { endpoint == &endpoint_id && pane == pane_id }),
+            "{action:?} must reveal the selected agent"
+        );
+    }
+}
+
+#[test]
+fn agent_navigation_keeps_scroll_when_target_is_visible() {
+    let (mut state, _) = state_with_scrollable_agents();
+    let (_, endpoint_id, pane_id) = state.hits.endpoint_agents[1].clone();
+    let targets = super::super::aggregate_navigation::online_agent_targets(
+        &state.endpoints,
+        &state.active_endpoint_id,
+        state.config.agent_panel_sort,
+    );
+    let index = targets
+        .iter()
+        .position(|target| target.endpoint_id == endpoint_id && target.pane_id == pane_id)
+        .unwrap();
+    let scroll = state.agent_scroll;
+    assert!(state.handle_endpoint_navigation(
+        crate::input::KeybindAction::FocusAgent(index),
+        &mut ClientShellInput::default(),
+    ));
+    state.compose(100, 28).unwrap();
+    assert_eq!(state.agent_scroll, scroll);
+}
+
+#[test]
 fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
     let (mut state, remote) = state_with_scrollable_agents();
     for endpoint_id in [remote.clone(), ClientEndpointId::Local, remote] {
