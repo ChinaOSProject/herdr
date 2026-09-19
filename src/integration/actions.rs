@@ -80,7 +80,7 @@ fn install_target_inner(
 
     if !profile.supported() {
         return Err(io::Error::other(format!(
-            "{} integration is not supported on Windows",
+            "{} integration is not supported on this platform",
             profile.cli_label()
         )));
     }
