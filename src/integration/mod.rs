@@ -12,7 +12,22 @@ mod targets;
 pub(crate) mod types;
 mod version;
 
-pub(crate) use actions::{install_target, uninstall_target};
+const LETTA_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "herdr-agent-session.ps1"
+} else {
+    "herdr-agent-session.sh"
+};
+const LETTA_HOOK_ASSET: &str = if cfg!(windows) {
+    include_str!("assets/letta/herdr-agent-session.ps1")
+} else {
+    include_str!("assets/letta/herdr-agent-session.sh")
+};
+const LETTA_INTEGRATION_VERSION: u32 = 1;
+const LETTA_HOOK_TIMEOUT_MS: u64 = 10_000;
+
+pub(crate) use actions::{
+    install_experimental_letta, install_target, uninstall_experimental_letta, uninstall_target,
+};
 #[cfg(windows)]
 pub(crate) use env::hermes_dir;
 #[cfg(test)]
@@ -25,9 +40,9 @@ pub(crate) use env::{
 };
 pub(crate) use opencode_config::tui_plugin_is_configured;
 pub(crate) use registry::{
-    executable_file_exists, installed_integration_statuses, integration_recommendations,
-    integration_recommendations_with_registry, integration_target_label, parse_integration_version,
-    print_outdated_update_notice,
+    executable_file_exists, experimental_letta_integration_status, installed_integration_statuses,
+    integration_recommendations, integration_recommendations_with_registry,
+    integration_target_label, parse_integration_version, print_outdated_update_notice,
 };
 pub(crate) use targets::{
     grok_hook_config, install_antigravity_cli, install_claude, install_codex, install_copilot,
@@ -38,7 +53,10 @@ pub(crate) use targets::{
     uninstall_kilo, uninstall_kimi, uninstall_mastracode, uninstall_omp, uninstall_opencode,
     uninstall_pi, uninstall_qodercli, uninstall_qwen,
 };
-pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind};
+pub(crate) use types::{
+    ExperimentalIntegrationStatus, IntegrationRecommendation, IntegrationStatus,
+    IntegrationStatusKind,
+};
 
 // Narrow compatibility imports for shared config/environment internals that
 // consume trusted built-in installer values.

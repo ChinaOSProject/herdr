@@ -722,7 +722,7 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
             .known_profiles()
             .map(|profile| profile.legacy_agent())
             .collect::<Vec<_>>();
-        assert_eq!(agents.len(), 23);
+        assert_eq!(agents.len(), 24);
         assert!(agents.contains(&Agent::Muse));
         let entries = agents
             .iter()

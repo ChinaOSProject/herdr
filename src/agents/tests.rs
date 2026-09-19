@@ -93,7 +93,7 @@ fn owned_registry_preserves_identity_indexes_independent_of_input_order() {
     }
 }
 
-const EXPECTED_IDENTITIES: [(Agent, &str, &[&str], &str, &str); 23] = [
+const EXPECTED_IDENTITIES: [(Agent, &str, &[&str], &str, &str); 24] = [
     (Agent::Pi, "pi", &[], "pi", "pi"),
     (
         Agent::Claude,
@@ -187,6 +187,13 @@ const EXPECTED_IDENTITIES: [(Agent, &str, &[&str], &str, &str); 23] = [
         "qwen",
         "qwen",
     ),
+    (
+        Agent::Letta,
+        "letta",
+        &["letta-code", "letta code"],
+        "letta",
+        "letta",
+    ),
     (Agent::Maki, "maki", &[], "maki", "maki"),
     (
         Agent::Muse,
@@ -208,7 +215,7 @@ type ExpectedReportPolicy = (
     bool,
 );
 
-const EXPECTED_REPORT_POLICIES: [ExpectedReportPolicy; 23] = [
+const EXPECTED_REPORT_POLICIES: [ExpectedReportPolicy; 24] = [
     (
         Agent::Pi,
         Some("herdr:pi"),
@@ -374,7 +381,7 @@ const EXPECTED_REPORT_POLICIES: [ExpectedReportPolicy; 23] = [
         Some("herdr:grok"),
         ReportAuthority::None,
         true,
-        &[],
+        &["new"],
         false,
         None,
         false,
@@ -420,6 +427,16 @@ const EXPECTED_REPORT_POLICIES: [ExpectedReportPolicy; 23] = [
         false,
     ),
     (
+        Agent::Letta,
+        Some("herdr:letta"),
+        ReportAuthority::SessionIdentityOnly,
+        false,
+        &[],
+        false,
+        None,
+        false,
+    ),
+    (
         Agent::Maki,
         None,
         ReportAuthority::None,
@@ -441,7 +458,7 @@ const EXPECTED_REPORT_POLICIES: [ExpectedReportPolicy; 23] = [
     ),
 ];
 
-const EXPECTED_SCREEN_DETECTABLE: [Agent; 21] = [
+const EXPECTED_SCREEN_DETECTABLE: [Agent; 22] = [
     Agent::Pi,
     Agent::Claude,
     Agent::Codex,
@@ -461,11 +478,12 @@ const EXPECTED_SCREEN_DETECTABLE: [Agent; 21] = [
     Agent::Kilo,
     Agent::Qodercli,
     Agent::Qwen,
+    Agent::Letta,
     Agent::Maki,
     Agent::Muse,
 ];
 
-const EXPECTED_RESUMABLE: [Agent; 17] = [
+const EXPECTED_RESUMABLE: [Agent; 18] = [
     Agent::Pi,
     Agent::Claude,
     Agent::Codex,
@@ -483,6 +501,7 @@ const EXPECTED_RESUMABLE: [Agent; 17] = [
     Agent::Kilo,
     Agent::Qodercli,
     Agent::Qwen,
+    Agent::Letta,
 ];
 
 const EXPECTED_INTEGRATION_CAPABLE: [Agent; 17] = [
@@ -534,8 +553,8 @@ const EXPECTED_INTEGRATION_PROFILES: [ExpectedIntegrationProfile; 17] = [
         &[],
         &["omp"],
         &["omp"],
-        9,
-        9,
+        10,
+        10,
     ),
     (
         IntegrationTarget::Claude,
@@ -544,8 +563,8 @@ const EXPECTED_INTEGRATION_PROFILES: [ExpectedIntegrationProfile; 17] = [
         &[],
         &["claude"],
         &["claude"],
-        9,
-        9,
+        10,
+        10,
     ),
     (
         IntegrationTarget::Codex,
@@ -684,8 +703,8 @@ const EXPECTED_INTEGRATION_PROFILES: [ExpectedIntegrationProfile; 17] = [
         &[],
         &["grok"],
         &["grok"],
-        1,
-        1,
+        2,
+        2,
     ),
 ];
 
@@ -872,12 +891,14 @@ fn report_policy_matrix_preserves_exact_official_pairs_and_replacement_rules() {
 
 #[test]
 fn process_matchers_have_unique_profile_ownership() {
-    const EXPECTED_SPECIAL_MATCHERS: [(Agent, usize, bool, bool); 5] = [
+    const EXPECTED_SPECIAL_MATCHERS: [(Agent, usize, bool, bool); 7] = [
         (Agent::Pi, 2, false, false),
         (Agent::Cursor, 0, true, false),
         (Agent::Cline, 0, false, true),
         (Agent::Mastracode, 1, false, false),
+        (Agent::Kimi, 1, false, false),
         (Agent::Qwen, 1, false, true),
+        (Agent::Letta, 1, false, true),
     ];
 
     let registry = registry();
@@ -932,7 +953,13 @@ fn process_matchers_have_unique_profile_ownership() {
     assert_eq!(actual_special_matchers, EXPECTED_SPECIAL_MATCHERS);
     assert_eq!(
         profile_agents(registry.process_profiles_with_package_layouts()),
-        [Agent::Pi, Agent::Mastracode, Agent::Qwen]
+        [
+            Agent::Pi,
+            Agent::Mastracode,
+            Agent::Kimi,
+            Agent::Qwen,
+            Agent::Letta
+        ]
     );
     assert_eq!(
         profile_agents(registry.process_profiles_with_bundled_node_layout()),

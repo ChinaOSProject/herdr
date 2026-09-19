@@ -10,8 +10,8 @@ unix = true
 windows = true
 
 [versions]
-unix = 9
-windows = 9
+unix = 10
+windows = 10
 
 [[assets]]
 path = "assets/herdr-agent-state.ts"

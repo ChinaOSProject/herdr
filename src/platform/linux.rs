@@ -368,6 +368,7 @@ fn foreground_job_from_members(
     running_inside_wsl: bool,
     mut read_argv: impl FnMut(u32) -> Option<Vec<String>>,
 ) -> Option<ForegroundJob> {
+    let wsl_registry = running_inside_wsl.then(crate::agents::registry);
     let processes = members
         .into_iter()
         .map(|member| {
@@ -375,10 +376,15 @@ fn foreground_job_from_members(
             // block indefinitely while a multithreaded process is exiting. A state
             // check alone has a race, so WSL uses the cheap comm-based identity when
             // it already identifies a supported agent without inspecting cmdline.
-            let argv =
-                process_allows_remote_memory_read(member.state, &member.comm, running_inside_wsl)
-                    .then(|| read_argv(member.pid))
-                    .flatten();
+            let argv = process_allows_remote_memory_read(
+                member.state,
+                &member.comm,
+                wsl_registry
+                    .as_deref()
+                    .map(|snapshot| snapshot.registry.as_ref()),
+            )
+            .then(|| read_argv(member.pid))
+            .flatten();
             ForegroundProcess {
                 pid: member.pid,
                 name: member.comm,
@@ -630,9 +636,16 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
         return None;
     }
 
-    let argv = process_allows_remote_memory_read(state, &name, running_inside_wsl())
-        .then(|| process_argv(process_group_id))
-        .flatten();
+    let wsl_registry = running_inside_wsl().then(crate::agents::registry);
+    let argv = process_allows_remote_memory_read(
+        state,
+        &name,
+        wsl_registry
+            .as_deref()
+            .map(|snapshot| snapshot.registry.as_ref()),
+    )
+    .then(|| process_argv(process_group_id))
+    .flatten();
     Some(ForegroundJob {
         process_group_id,
         processes: vec![ForegroundProcess {
@@ -680,9 +693,15 @@ fn process_state_allows_remote_memory_read(state: char) -> bool {
     !matches!(state, 'D' | 'Z' | 'X' | 'x')
 }
 
-fn process_allows_remote_memory_read(state: char, comm: &str, running_inside_wsl: bool) -> bool {
+fn process_allows_remote_memory_read(
+    state: char,
+    comm: &str,
+    wsl_registry: Option<&crate::agents::AgentRegistry>,
+) -> bool {
     process_state_allows_remote_memory_read(state)
-        && (!running_inside_wsl || crate::detect::identify_agent(comm).is_none())
+        && wsl_registry.is_none_or(|registry| {
+            crate::detect::identify_agent_with_registry(registry, comm).is_none()
+        })
 }
 
 fn process_argv(pid: u32) -> Option<Vec<String>> {
@@ -724,7 +743,7 @@ pub(crate) fn process_agent_hint_with_registry(
         return None;
     }
     let (_, comm, state) = process_pgrp_comm_and_state(pid)?;
-    if !process_allows_remote_memory_read(state, &comm, running_inside_wsl()) {
+    if !process_allows_remote_memory_read(state, &comm, running_inside_wsl().then_some(registry)) {
         return None;
     }
     let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;

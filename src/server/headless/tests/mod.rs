@@ -845,6 +845,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             surface_reuse: false,
             surface_delta: false,
             client_id: 77,
+            notification_sound_profile: false,
             surface_cols: 80,
             surface_rows: 23,
             cell_width_px: 0,

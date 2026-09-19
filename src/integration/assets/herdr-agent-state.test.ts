@@ -237,7 +237,7 @@ test("OMP ignores nested sessions launched inside another OMP shell", async () =
   process.env.OMPCODE = "1";
   const { handlers, pi } = createExtensionHarness();
 
-  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  const { default: install } = await importFresh("../../../vendor/agent-registry/agents/omp/assets/herdr-agent-state.ts");
   install(pi);
 
   // OMP sets OMPCODE on every shell it spawns. A nested `omp` inherits it and

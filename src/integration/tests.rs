@@ -8,6 +8,7 @@ use super::targets::*;
 use super::test_support::symlink_file;
 use super::types::*;
 use super::version::*;
+use super::{install_target, uninstall_target, LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS};
 
 use crate::integration::builtin::agy::{
     HOOK_ASSET as ANTIGRAVITY_CLI_HOOK_ASSET, HOOK_BLOCK_NAME as ANTIGRAVITY_CLI_HOOK_BLOCK_NAME,
@@ -1672,7 +1673,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
     let status = integration_status_at(
         crate::api::schema::IntegrationTarget::Claude,
         hook_path,
-        CLAUDE_INTEGRATION_VERSION,
+        expected_integration_version(crate::api::schema::IntegrationTarget::Claude),
     );
     assert_eq!(status.installed_version, Some(10));
     assert_eq!(status.state, IntegrationStatusKind::Current);
@@ -2899,7 +2900,7 @@ fn opencode_reuses_json_registration_in_symlinked_config_directory() {
             integration_status_at(
                 crate::api::schema::IntegrationTarget::Opencode,
                 installed.plugin_path,
-                OPENCODE_INTEGRATION_VERSION,
+                expected_integration_version(crate::api::schema::IntegrationTarget::Opencode),
             )
             .state,
             IntegrationStatusKind::Current
@@ -5109,7 +5110,10 @@ fn grok_v1_integration_status_is_outdated() {
         .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
         .expect("grok integration status");
     assert_eq!(grok.installed_version, Some(1));
-    assert_eq!(grok.expected_version, GROK_INTEGRATION_VERSION);
+    assert_eq!(
+        grok.expected_version,
+        expected_integration_version(crate::api::schema::IntegrationTarget::Grok)
+    );
     assert_eq!(grok.state, IntegrationStatusKind::Outdated);
 
     clear_integration_path_env();

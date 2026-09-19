@@ -230,7 +230,6 @@ impl Default for SoundConfig {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -238,7 +237,7 @@ mod tests {
     use super::*;
     use crate::config::{config_path, Config};
 
-    const EXPECTED_SOUND_PROFILES: [(Agent, Option<&str>, AgentSoundSetting); 23] = [
+    const EXPECTED_SOUND_PROFILES: [(Agent, Option<&str>, AgentSoundSetting); 24] = [
         (Agent::Pi, Some("pi"), AgentSoundSetting::Default),
         (Agent::Claude, Some("claude"), AgentSoundSetting::Default),
         (Agent::Codex, Some("codex"), AgentSoundSetting::Default),
@@ -272,6 +271,7 @@ mod tests {
             AgentSoundSetting::Default,
         ),
         (Agent::Qwen, Some("qwen"), AgentSoundSetting::Default),
+        (Agent::Letta, Some("letta"), AgentSoundSetting::Default),
         (Agent::Maki, Some("maki"), AgentSoundSetting::Default),
         (Agent::Muse, Some("muse"), AgentSoundSetting::Default),
     ];
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn registry_preserves_the_existing_sound_key_and_default_matrix() {
         let registry = crate::agents::registry();
-        assert_eq!(EXPECTED_SOUND_PROFILES.len(), 23);
+        assert_eq!(EXPECTED_SOUND_PROFILES.len(), 24);
 
         for (agent, key, default) in EXPECTED_SOUND_PROFILES {
             let profile = registry.profile_for_agent(agent);
@@ -314,7 +314,7 @@ mod tests {
                 .known_profiles()
                 .filter(|profile| profile.sound().is_some())
                 .count(),
-            21
+            22
         );
         assert!(registry.sound_profile_by_config_key("unknown").is_none());
         assert_eq!(

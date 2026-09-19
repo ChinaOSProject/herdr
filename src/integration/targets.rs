@@ -26,7 +26,7 @@ use super::env::{
     omp_extension_dir, opencode_dir, opencode_state_dir, pi_extension_dir, qodercli_dir, qwen_dir,
 };
 use super::file_ops::{
-    atomic_replace_asset, remove_dir_all_if_exists, remove_file_if_exists,
+    atomic_replace_asset, make_executable, remove_dir_all_if_exists, remove_file_if_exists,
     remove_legacy_bash_hook_file,
 };
 use super::opencode_config::{
@@ -44,6 +44,7 @@ use super::types::{
     OmpUninstallResult, OpenCodeInstallPaths, OpenCodeUninstallResult, PiUninstallResult,
     QodercliInstallPaths, QodercliUninstallResult, QwenInstallPaths, QwenUninstallResult,
 };
+use super::{LETTA_HOOK_ASSET, LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS};
 use crate::integration::builtin::agy::{
     HOOK_BLOCK_NAME as ANTIGRAVITY_CLI_HOOK_BLOCK_NAME, HOOK_EVENTS as ANTIGRAVITY_CLI_HOOK_EVENTS,
     HOOK_INSTALL_NAME as ANTIGRAVITY_CLI_HOOK_INSTALL_NAME,

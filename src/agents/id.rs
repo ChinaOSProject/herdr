@@ -79,12 +79,13 @@ impl AgentId {
     pub const Kilo: Self = Self::from_canonical("kilo");
     pub const Qodercli: Self = Self::from_canonical("qodercli");
     pub const Qwen: Self = Self::from_canonical("qwen");
+    pub const Letta: Self = Self::from_canonical("letta");
     pub const Maki: Self = Self::from_canonical("maki");
     pub const Muse: Self = Self::from_canonical("muse");
 
     /// Legacy built-in identities, for compatibility and tests only.
     /// Never use this list to decide whether an ID is valid or registered.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -106,6 +107,7 @@ impl AgentId {
         Self::Kilo,
         Self::Qodercli,
         Self::Qwen,
+        Self::Letta,
         Self::Maki,
         Self::Muse,
     ];

@@ -39,7 +39,7 @@ fn run_devin_hook(
 
 fn run_grok_hook(hook_input: &str, envs: &[(&str, &str)]) -> Option<serde_json::Value> {
     run_shell_hook_with_env(
-        "src/integration/assets/grok/herdr-agent-state.sh",
+        "vendor/agent-registry/agents/grok/assets/herdr-agent-state.sh",
         &["session"],
         hook_input,
         envs,

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/herdrdev/agent-registry",
-  "sha256": "c85b430d22cb70f7dc3fe6f374a74c0a4f0c7dd085af9221b8a04fb1730316db",
+  "sha256": "5116c622b2992fec3c50f1e65e7ff5b5e5381497f5b06d28b5ddb14da05f5a29",
   "files": [
     {
       "path": "agents/agy/agent.toml",
@@ -49,11 +49,11 @@
     },
     {
       "path": "agents/claude/assets/herdr-agent-state.ps1",
-      "sha256": "6db8bf92db45a3c5aa67994c1fb665231339e1dc3b08c28239c246c0874ebaaa"
+      "sha256": "37faa01a19a1aec4a5dbed4110f9aea4beddd15a195a2b36f8b9d9d5cb27f26e"
     },
     {
       "path": "agents/claude/assets/herdr-agent-state.sh",
-      "sha256": "a61bbe2619a316669406316de260c13b6c1ae525dafd6f4f4956e26646268105"
+      "sha256": "7f117c303ffc1a66975b76dda8189d70b718fc04af4cf7cb11449e4ee5b4ae86"
     },
     {
       "path": "agents/claude/detection.toml",
@@ -61,7 +61,7 @@
     },
     {
       "path": "agents/claude/integration.toml",
-      "sha256": "7ac77a16539d085eaf44950e38747baf991b55fab93bae666e79f7f45757beb0"
+      "sha256": "b59461dcde1d06daab34e1ce1952fa07b56f6edfd3692b699885906ed1c3be71"
     },
     {
       "path": "agents/claude/process.toml",
@@ -97,7 +97,7 @@
     },
     {
       "path": "agents/codex/detection.toml",
-      "sha256": "c9780984fec679a5a1a91f2018ba486a74d971e5837324a2a1d95047178d5a22"
+      "sha256": "0df10b3aed1a2185f6fe7645db7077de36d259b79cde216024895b0e75f7fb67"
     },
     {
       "path": "agents/codex/integration.toml",
@@ -241,19 +241,19 @@
     },
     {
       "path": "agents/grok/assets/herdr-agent-state.ps1",
-      "sha256": "f5868cb925780899a912f06e38c5000cca913627556816d4d9b2f8f73e8bda3b"
+      "sha256": "ef97720e9001d0d257c241a51693df3ffb4b59f051e51c480957478d1a14328f"
     },
     {
       "path": "agents/grok/assets/herdr-agent-state.sh",
-      "sha256": "a5c66f3117037341df12e59fbefc5ff9869e092f8766dedf0500629e24006def"
+      "sha256": "2894f173ca798e448a70467fdf8513e6f4c40355f41d411bbe7d32b234d43857"
     },
     {
       "path": "agents/grok/detection.toml",
-      "sha256": "618afc3d09d784343fc6c4bcee5801906df2c0fd62a65b447cf5f4b1bd215bb2"
+      "sha256": "4298dd2ea7d124f3ba5d72b649bbb4fb6edc533d7e6e546d523a8214fa31456d"
     },
     {
       "path": "agents/grok/integration.toml",
-      "sha256": "eacf1c894261b3b61358a69e0c0e93ee7c2bb068c5fa3f378f17ddf9dea390bd"
+      "sha256": "c84190ef71d88abe575622fd071517c2c9795b3bd9d538ea2bc144d92b40effb"
     },
     {
       "path": "agents/grok/process.toml",
@@ -337,7 +337,7 @@
     },
     {
       "path": "agents/kimi/process.toml",
-      "sha256": "6667e09624d84f367232b4edd3c397f2b853285ef05ac1bb0b9c8336fbaca56e"
+      "sha256": "ce371b0daaaa824f45604b754eb50df891fd42341959d47b75025da342f5b9a6"
     },
     {
       "path": "agents/kimi/resume.toml",
@@ -354,6 +354,22 @@
     {
       "path": "agents/kiro/process.toml",
       "sha256": "a4db775feeb1389b6d4903d2a34027617ca144101f61640f19cf24338873dd81"
+    },
+    {
+      "path": "agents/letta/agent.toml",
+      "sha256": "da51a324a4bb3723b56c0ed72f0c02ca97abd266ba15e7d4c6f1ab0d59cf62f6"
+    },
+    {
+      "path": "agents/letta/detection.toml",
+      "sha256": "205b8c135584c86f9f529aa2d061109b5129085cc5c3124c6dbfe0e78fcdba43"
+    },
+    {
+      "path": "agents/letta/process.toml",
+      "sha256": "c1e7f179e2ea25dc5dfecab8ac8c2b8a2fa837b6d1b4bd217b2f34ce6812597c"
+    },
+    {
+      "path": "agents/letta/resume.toml",
+      "sha256": "4b8ecfc1e818f94db490878ba9ded5628e2090a4b6d98897d3348374c9154e14"
     },
     {
       "path": "agents/maki/agent.toml",
@@ -409,11 +425,11 @@
     },
     {
       "path": "agents/omp/assets/herdr-agent-state.ts",
-      "sha256": "4cfd1e32da1f15efba0521c52fee3ba4b23c36dc236a77aea922220fdefa024e"
+      "sha256": "e3c650752bb9c2eb8bc1eecc9ce845c27434f6b7331af161353dd06ca6de48b7"
     },
     {
       "path": "agents/omp/integration.toml",
-      "sha256": "8381007563ac40afa262a2e05e62538685a0dffcfc7e48e99332ab0da05986d8"
+      "sha256": "d5e1d12a47ef84fe5faf20e79623bb0059096b311ee4c35f44ba870b31b995fc"
     },
     {
       "path": "agents/omp/process.toml",
@@ -461,7 +477,7 @@
     },
     {
       "path": "agents/pi/detection.toml",
-      "sha256": "d852f52d637040fad207a395928dc190d99d24b6c72d6e1b7fbbf4487a416e40"
+      "sha256": "57469b82e4239bf93559ed5d400c9d9f86a9e64d5def728b7d4bb398be7659ca"
     },
     {
       "path": "agents/pi/integration.toml",

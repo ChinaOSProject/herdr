@@ -62,7 +62,12 @@ pub(super) fn policy(agent: Agent) -> ReportPolicy {
             ReportPolicy::official("herdr:kimi", FullLifecycle, false, Replacement::NONE)
         }
         Agent::Droid => ReportPolicy::official("herdr:droid", NoAuthority, true, Replacement::NONE),
-        Agent::Grok => ReportPolicy::official("herdr:grok", NoAuthority, true, Replacement::NONE),
+        Agent::Grok => {
+            ReportPolicy::official("herdr:grok", NoAuthority, true, Replacement::events(&[New]))
+        }
+        Agent::Letta => {
+            ReportPolicy::official("herdr:letta", SessionIdentityOnly, false, Replacement::NONE)
+        }
         Agent::Hermes => ReportPolicy::official(
             "herdr:hermes",
             SessionIdentityOnly,

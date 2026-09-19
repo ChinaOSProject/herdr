@@ -184,10 +184,8 @@ pub(crate) fn pinned_plan(
     }
     Ok(AgentResumePlan {
         agent: session.agent.clone(),
-        argv: profile
-            .session()
-            .ok_or("agent resume is unavailable")?
-            .argv(&active.executable, &session.session_ref.value),
+        argv: native_resume_argv(profile, &session.session_ref.value)
+            .ok_or("agent resume reference is invalid")?,
         resume_options: Vec::new(),
         dedupe_key: dedupe_key(&session.source, &session.agent, &session.session_ref),
         strict_input_readiness: crate::detect::manifest::requires_screen_visible_idle(
@@ -195,6 +193,23 @@ pub(crate) fn pinned_plan(
             profile.legacy_agent(),
         ),
     })
+}
+
+fn native_resume_argv(profile: &crate::agents::AgentProfile, value: &str) -> Option<Vec<String>> {
+    let session = profile.session()?;
+    let executable = profile.launch().executable();
+    // Letta's default conversation is scoped to an agent, unlike a standalone conversation ID.
+    if profile.legacy_agent() == crate::detect::Agent::Letta {
+        if let Some(agent_id) = value.strip_prefix("default:") {
+            if agent_id.is_empty() {
+                return None;
+            }
+            let mut argv = session.argv(executable, "default");
+            argv.extend(["--agent".into(), agent_id.into()]);
+            return Some(argv);
+        }
+    }
+    Some(session.argv(executable, value))
 }
 
 impl AgentResumePlan {
@@ -377,7 +392,7 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
     if !session_profile_accepts_kind(session, session_ref.kind) {
         return None;
     }
-    let argv = session.argv(profile.launch().executable(), &session_ref.value);
+    let argv = native_resume_argv(profile, &session_ref.value)?;
 
     Some(AgentResumePlan {
         agent: agent.to_string(),

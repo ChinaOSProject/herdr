@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use regex::Regex;
 use serde::Deserialize;
@@ -244,7 +247,6 @@ impl From<ManifestState> for AgentState {
 fn default_region() -> String {
     "whole_recent".to_string()
 }
-
 
 const MAX_RULES_PER_MANIFEST: usize = 128;
 const MAX_GATE_DEPTH: usize = 8;

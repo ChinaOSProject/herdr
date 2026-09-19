@@ -361,12 +361,13 @@ fn detection_uses_cached_local_override_until_explicit_reload() {
 #[test]
 fn compiled_rules_are_shared_until_manifest_reload() {
     with_manifest_dirs("shared-compiled-rules", || {
-        write_remote_codex(&format!(
+        write_local_codex(&format!(
             "{}\nregex = ['^cached-[a-z]+$']\n",
-            remote_manifest("9999.01.01.1", "blocked", "cached-ready")
+            versioned_manifest("9999.01.01.1", "blocked", "cached-ready")
         ));
-        let first = load_manifest(Agent::Codex).unwrap();
-        let second = load_manifest(Agent::Codex).unwrap();
+        let snapshot = crate::agents::registry();
+        let first = load_manifest(&snapshot.manifests, Agent::Codex).unwrap();
+        let second = load_manifest(&snapshot.manifests, Agent::Codex).unwrap();
         assert!(!first.compiled_rules.is_empty());
         assert_eq!(
             first.compiled_rules.as_ptr(),
@@ -374,19 +375,20 @@ fn compiled_rules_are_shared_until_manifest_reload() {
             "cached loads must retain the same compiled rules and regex search caches"
         );
 
-        write_remote_codex_without_reload(&format!(
+        write_local_codex_without_reload(&format!(
             "{}\nregex = ['^new-[a-z]+$']\n",
-            remote_manifest("9999.01.01.2", "working", "new-ready")
+            versioned_manifest("9999.01.01.2", "working", "new-ready")
         ));
-        let unchanged = load_manifest(Agent::Codex).unwrap();
+        let unchanged = load_manifest(&snapshot.manifests, Agent::Codex).unwrap();
         assert_eq!(
             first.compiled_rules.as_ptr(),
             unchanged.compiled_rules.as_ptr()
         );
 
         reload_manifests_for_agents(&[Agent::Codex]);
-        let reloaded = load_manifest(Agent::Codex).unwrap();
-        let shared_reload = load_manifest(Agent::Codex).unwrap();
+        let snapshot = crate::agents::registry();
+        let reloaded = load_manifest(&snapshot.manifests, Agent::Codex).unwrap();
+        let shared_reload = load_manifest(&snapshot.manifests, Agent::Codex).unwrap();
         assert_ne!(
             first.compiled_rules.as_ptr(),
             reloaded.compiled_rules.as_ptr()
@@ -412,7 +414,8 @@ fn compiled_rules_are_shared_until_manifest_reload() {
             for _ in 0..4 {
                 let reloaded = &reloaded;
                 scope.spawn(move || {
-                    let loaded = load_manifest(Agent::Codex).unwrap();
+                    let snapshot = crate::agents::registry();
+                    let loaded = load_manifest(&snapshot.manifests, Agent::Codex).unwrap();
                     assert_eq!(
                         loaded.compiled_rules.as_ptr(),
                         reloaded.compiled_rules.as_ptr()
@@ -545,8 +548,7 @@ contains = ["overlay-marker"]
         assert!(!result.visible_working);
         assert!(!result.visible_blocker);
         assert!(detect(Agent::Codex, screen).skip_state_update);
-        assert!(should_skip_state_update(Agent::Codex, screen));
-        assert!(!should_skip_state_update(Agent::Codex, "activity-marker"));
+        assert!(!detect(Agent::Codex, "activity-marker").skip_state_update);
     });
 }
 

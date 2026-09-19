@@ -133,6 +133,13 @@ fn print_integration_messages(messages: Vec<String>) {
     }
 }
 
+// Letta retains master's CLI-only installer without extending the frozen endpoint enum.
+#[derive(Debug, PartialEq, Eq)]
+enum IntegrationCommandTarget {
+    Builtin(IntegrationTarget),
+    Letta,
+}
+
 fn integration_target_labels() -> Vec<String> {
     crate::agents::registry()
         .integration_capable_profiles()
@@ -143,6 +150,7 @@ fn integration_target_labels() -> Vec<String> {
                 .cli_label()
                 .to_owned()
         })
+        .chain(std::iter::once("letta".to_owned()))
         .collect()
 }
 
@@ -166,6 +174,9 @@ fn parse_integration_target(
         return Ok(None);
     }
 
+    if target == "letta" {
+        return Ok(Some(IntegrationCommandTarget::Letta));
+    }
     let Some(parsed) = crate::agents::registry()
         .profile_by_integration_cli_name(target)
         .and_then(|profile| profile.integration())
@@ -179,7 +190,7 @@ fn parse_integration_target(
         return Ok(None);
     };
 
-    Ok(Some(parsed))
+    Ok(Some(IntegrationCommandTarget::Builtin(parsed)))
 }
 
 fn print_integration_help() {
@@ -205,7 +216,7 @@ mod tests {
             {
                 assert_eq!(
                     parse_integration_target(&[name.to_string()], "install").unwrap(),
-                    Some(integration.target())
+                    Some(IntegrationCommandTarget::Builtin(integration.target()))
                 );
             }
         }

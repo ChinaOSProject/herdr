@@ -121,9 +121,6 @@ pub fn identify_agent_in_job_with_registry(
         let Some((agent, candidate)) = recognizer.normalized_process_name(process) else {
             continue;
         };
-        if agent == Agent::Letta && !is_interactive_letta_process(process) {
-            continue;
-        }
         let score = process_priority(process, &candidate);
 
         match &best {
@@ -212,11 +209,121 @@ pub(crate) fn structured_resume_args<'a>(
     (canonical == agent.as_str()).then(|| &argv[start..])
 }
 
+fn letta_first_arg_after_backend_selection(args: &[String]) -> Option<&str> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--backend" {
+            let _ = args.next();
+            continue;
+        }
+        if arg.starts_with("--backend=") {
+            continue;
+        }
+        return Some(arg);
+    }
+    None
+}
+
 struct ProcessRecognizer<'a> {
     registry: &'a AgentRegistry,
 }
 
 impl ProcessRecognizer<'_> {
+    fn letta_entrypoint_index(&self, argv: &[String]) -> Option<usize> {
+        let is_letta = |arg: &str| {
+            self.agent_name_from_path_token(arg).as_deref() == Some(Agent::Letta.as_str())
+        };
+        if argv.first().is_some_and(|arg| is_letta(arg)) {
+            return Some(0);
+        }
+
+        let runtime = argv
+            .first()
+            .map(|arg| normalized_agent_lookup_name(path_basename(arg)))?;
+        if !matches!(runtime.as_str(), "node" | "bun") {
+            return None;
+        }
+
+        let mut index = 1;
+        while let Some(arg) = argv.get(index) {
+            if arg == "--" {
+                return argv
+                    .get(index + 1)
+                    .is_some_and(|arg| is_letta(arg))
+                    .then_some(index + 1);
+            }
+            if flag_matches(arg, &["-e", "--eval", "-p", "--print"]) {
+                return None;
+            }
+            if arg.starts_with('-') {
+                index += if option_takes_value(arg) { 2 } else { 1 };
+                continue;
+            }
+            return is_letta(arg).then_some(index);
+        }
+        None
+    }
+
+    fn is_interactive_letta_process(&self, process: &crate::platform::ForegroundProcess) -> bool {
+        let parsed_cmdline;
+        let argv = if let Some(argv) = process.argv.as_deref() {
+            argv
+        } else {
+            parsed_cmdline = process
+                .cmdline
+                .as_deref()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(|arg| arg.trim_matches(|ch| matches!(ch, '\'' | '"')).to_string())
+                .collect::<Vec<_>>();
+            if parsed_cmdline.is_empty() {
+                return true;
+            }
+            &parsed_cmdline
+        };
+
+        let cli_args = self
+            .letta_entrypoint_index(argv)
+            .map(|index| &argv[index + 1..])
+            .unwrap_or(argv);
+
+        if cli_args.iter().any(|arg| {
+            let option = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+            matches!(
+                option,
+                "-p" | "--print"
+                    | "--prompt"
+                    | "--json"
+                    | "--stream-json"
+                    | "--run"
+                    | "--disable-memory-guard"
+                    | "--output-format"
+                    | "--input-format"
+                    | "--include-partial-messages"
+                    | "--from-agent"
+                    | "--environment"
+                    | "--env"
+                    | "--pre-load-skills"
+                    | "--tags"
+                    | "--ephemeral"
+                    | "--stateless"
+                    | "--max-turns"
+                    | "--memfs-startup"
+                    | "-h"
+                    | "--help"
+                    | "-v"
+                    | "--version"
+                    | "--info"
+                    | "--update"
+                    | "--upgrade"
+            )
+        }) {
+            return false;
+        }
+
+        letta_first_arg_after_backend_selection(cli_args).is_none_or(|arg| arg.starts_with('-'))
+    }
+
     fn structured_agent_entrypoint(&self, argv: &[String]) -> Option<(String, usize)> {
         let runtime = normalized_agent_lookup_name(path_basename(argv.first()?));
         if !is_generic_runtime_or_shell(&runtime) {
@@ -235,6 +342,15 @@ impl ProcessRecognizer<'_> {
     }
 
     fn normalized_process_name(
+        &self,
+        process: &crate::platform::ForegroundProcess,
+    ) -> Option<(Agent, String)> {
+        let candidate = self.unfiltered_process_name(process)?;
+        (candidate.0 != Agent::Letta || self.is_interactive_letta_process(process))
+            .then_some(candidate)
+    }
+
+    fn unfiltered_process_name(
         &self,
         process: &crate::platform::ForegroundProcess,
     ) -> Option<(Agent, String)> {
@@ -668,7 +784,6 @@ fn option_takes_value(arg: &str) -> bool {
             | "-o"
     )
 }
-
 
 fn normalized_agent_lookup_name(name: &str) -> String {
     let mut name = name.trim().to_lowercase();

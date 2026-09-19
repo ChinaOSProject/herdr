@@ -10,8 +10,8 @@ unix = true
 windows = true
 
 [versions]
-unix = 1
-windows = 1
+unix = 2
+windows = 2
 
 [[assets]]
 path = "assets/herdr-agent-state.ps1"

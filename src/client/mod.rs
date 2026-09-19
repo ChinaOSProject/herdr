@@ -1901,6 +1901,7 @@ async fn run_client_loop(
                                         projection,
                                     );
                                 }
+                                continue;
                             }
                             Ok(endpoint::EndpointControlMessage::Notification(event)) => {
                                 if let Some(shell) = state.shell.as_mut() {

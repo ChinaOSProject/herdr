@@ -272,13 +272,33 @@ fn integration_status_with_adapter(
     }
 }
 
+fn integration_state_for_path(
+    path: &Path,
+    expected_version: u32,
+) -> (super::IntegrationStatusKind, Option<u32>) {
+    if !path.is_file() {
+        return (super::IntegrationStatusKind::NotInstalled, None);
+    }
+
+    let installed_version = fs::read_to_string(path)
+        .ok()
+        .and_then(|content| parse_integration_version(&content));
+    let state = if installed_version.is_some_and(|version| version >= expected_version) {
+        super::IntegrationStatusKind::Current
+    } else {
+        super::IntegrationStatusKind::Outdated
+    };
+
+    (state, installed_version)
+}
+
 /// Letta is intentionally kept out of the frozen client endpoint
 /// `IntegrationTarget` enum so published generation-1 clients never receive an
 /// unknown variant. It is installable and reportable as an experimental
 /// CLI-only target until the agent registry replaces the enum-keyed registry.
 pub(crate) fn experimental_letta_integration_status() -> Option<super::ExperimentalIntegrationStatus>
 {
-    let path = letta_dir()
+    let path = super::env::letta_dir()
         .ok()?
         .join("hooks")
         .join(super::LETTA_HOOK_INSTALL_NAME);

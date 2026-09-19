@@ -934,10 +934,11 @@ fn integration_target_arg() -> Arg {
         .required(true)
         .value_parser(|value: &str| -> Result<String, String> {
             let registry = crate::agents::registry();
-            if registry
-                .profile_by_integration_cli_name(value)
-                .and_then(|profile| profile.integration())
-                .is_some()
+            if value == "letta"
+                || registry
+                    .profile_by_integration_cli_name(value)
+                    .and_then(|profile| profile.integration())
+                    .is_some()
             {
                 Ok(value.to_owned())
             } else {
