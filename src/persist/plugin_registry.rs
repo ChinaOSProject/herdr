@@ -88,7 +88,13 @@ pub fn update<T>(
 }
 
 pub fn try_load() -> std::io::Result<Vec<InstalledPluginInfo>> {
-    with_registry_lock(|| load_from_path_strict(&registry_path()))
+    read(Ok)
+}
+
+pub(crate) fn read<T>(
+    operation: impl FnOnce(Vec<InstalledPluginInfo>) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    with_registry_lock(|| operation(load_from_path_strict(&registry_path())?))
 }
 
 /// Load the global registry. Returns an empty vec on failure so a corrupt or

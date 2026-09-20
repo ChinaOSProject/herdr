@@ -76,8 +76,11 @@ fn ensure_plugin_config_dir(plugin_id: &str) -> std::io::Result<()> {
 
 fn legacy_plugin_config_dirs(plugin_id: &str) -> Vec<PathBuf> {
     let plugins_dir = managed_plugins_dir();
-    let old_unhashed =
-        (!matches!(plugin_id, "config" | "github")).then(|| plugins_dir.join(plugin_id));
+    let old_unhashed = (!matches!(
+        plugin_id,
+        "config" | "github" | "github-installations" | ".locks"
+    ))
+    .then(|| plugins_dir.join(plugin_id));
     let current_hashed =
         plugins_dir.join(crate::api::schema::plugin_managed_path_component(plugin_id));
     let mut candidates = Vec::new();
@@ -160,6 +163,14 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(first.join("keep")).unwrap(),
             "original"
+        );
+        ensure_plugin_config_dir("github-installations").unwrap();
+        assert!(
+            std::fs::read_dir(plugin_config_dir("github-installations"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "managed installations are not legacy user configuration"
         );
         std::fs::remove_dir_all(&first).unwrap();
         std::fs::remove_dir_all(&second).unwrap();

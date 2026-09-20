@@ -194,8 +194,9 @@ herdr plugin log list --plugin example.layout
 terminals, builds in a new Herdr-managed installation directory, and registers
 it. Use `--yes` for noninteractive installs. Updates and reinstalls leave the
 previous installation in place: running commands and panes keep their original
-files, while new invocations use the new installation. Existing processes are
-not restarted, and startup hooks run at the next server startup as usual.
+files, while new invocations use the new installation without a config reload.
+Existing processes are not restarted, and startup hooks run at the next server
+startup as usual.
 `plugin update` refreshes every GitHub-managed plugin when called without a
 target, or only the listed plugin ids or GitHub sources. It refetches the ref
 recorded during install, skips unchanged commits, and ignores locally linked
@@ -213,10 +214,13 @@ directory for setup docs and shell scripts.
 `plugin uninstall <id-or-source>` unregisters the plugin and accepts either the
 plugin id or the same `owner/repo[/subdir...]` shorthand used by install.
 Installation files are retained after updates, reinstalls, and uninstall so
-running plugins can finish. There is currently no automatic cleanup; retained
-installations consume disk space. Remove an old installation manually only
-after all commands and panes using it, including background processes and
-plugins in other Herdr sessions, have stopped. Config and state are preserved.
+running plugins can finish. A later successful installation/update or server
+startup automatically removes obsolete managed installations once the servers
+using them have exited. Reloading config does not release old installations.
+Stop plugin work before shutting down its server: processes surviving server
+exit are not protected from cleanup. Plugins must stop detached background
+processes before their parent command or pane exits. Legacy installations
+without cleanup tracking are retained. Config and state are preserved.
 `plugin unlink <id>` only unregisters a plugin and leaves files alone, which is
 useful for local development.
 

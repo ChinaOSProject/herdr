@@ -467,6 +467,19 @@ fn plugin_update_refreshes_selected_then_all_github_plugins() {
 
     let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", "updates"]);
     drop(server);
+    let unchanged = run_named_cli_with_env(
+        &config_home,
+        &runtime_dir,
+        &["plugin", "update", "--yes"],
+        &[("GIT_CONFIG_GLOBAL", &git_config)],
+    );
+    assert!(unchanged.status.success());
+    assert!(
+        !first_installation.exists(),
+        "stopped servers release old files"
+    );
+    assert!(!second_installation.exists());
+    assert!(local_dir.exists(), "cleanup never removes local plugins");
     cleanup_test_base(&base);
 }
 

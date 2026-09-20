@@ -326,7 +326,7 @@ fn install_github_plugin(
                 == Some(resolved_commit.as_str())
         {
             println!("{} is already up to date.", preview_plugin.plugin_id);
-            return Ok(0);
+            return Ok(true);
         }
 
         let mut source_info =
@@ -342,10 +342,11 @@ fn install_github_plugin(
                 "plugin {} cancelled",
                 if updating { "update" } else { "install" }
             );
-            return Ok(0);
+            return Ok(false);
         }
         let installation =
             crate::plugin_paths::create_managed_installation(&preview_plugin.plugin_id)?;
+        let installation_lease = crate::plugin_installations::create_lease(&installation)?;
         let final_checkout = installation.join("checkout");
         let mut activation_attempted = false;
         let install_attempt = (|| {
@@ -376,6 +377,7 @@ fn install_github_plugin(
         let plugin = match install_attempt {
             Ok(plugin) => plugin,
             Err(err) => {
+                drop(installation_lease);
                 // A failed activation may have published the path. Never delete files
                 // that a server or a plugin process could already be using.
                 if activation_attempted {
@@ -393,8 +395,6 @@ fn install_github_plugin(
                 return Err(err);
             }
         };
-        // ponytail: retain old installations, including across uninstall. Reclaim
-        // them only once plugin process lifetimes can be tracked reliably.
         println!(
             "{} {} from {}.",
             if updating { "Updated" } else { "Installed" },
@@ -405,10 +405,17 @@ fn install_github_plugin(
             "Config: {}",
             crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
         );
-        Ok(0)
+        Ok(true)
     })();
     let _ = std::fs::remove_dir_all(&temp_root);
-    install_result
+    install_result.map(|cleanup| {
+        if cleanup {
+            if let Err(err) = crate::plugin_installations::cleanup() {
+                eprintln!("Plugin cleanup deferred: {err}");
+            }
+        }
+        0
+    })
 }
 
 fn plugin_uninstall(args: &[String]) -> std::io::Result<i32> {
