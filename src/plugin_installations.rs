@@ -19,15 +19,19 @@ pub(crate) fn create_lease(installation: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn lease_path(checkout: &Path) -> Option<PathBuf> {
-    (checkout.file_name()? == "checkout").then(|| {
-        let path = checkout.parent()?;
-        Some(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
-    })?
+fn lease_path(path: &Path) -> Option<PathBuf> {
+    let root = crate::plugin_paths::managed_plugins_dir()
+        .join("github-installations")
+        .canonicalize()
+        .ok()?;
+    let path = path.canonicalize().ok()?;
+    let mut components = path.strip_prefix(&root).ok()?.components();
+    let installation = root.join(components.next()?).join(components.next()?);
+    (components.next()?.as_os_str() == "checkout").then_some(installation)
 }
 
 pub(crate) fn command_lease(leases: &Leases, plugin: &InstalledPluginInfo) -> Option<Arc<File>> {
-    let installation = lease_path(Path::new(plugin.source.managed_path.as_deref()?))?;
+    let installation = lease_path(Path::new(&plugin.plugin_root))?;
     leases.get(&installation).cloned()
 }
 
@@ -57,9 +61,7 @@ fn retain_checkout(leases: &mut Leases, checkout: &Path) -> io::Result<()> {
 pub(crate) fn load(leases: &mut Leases) -> io::Result<Vec<InstalledPluginInfo>> {
     crate::persist::plugin_registry::read(|entries| {
         for entry in &entries {
-            if let Some(path) = &entry.source.managed_path {
-                retain_checkout(leases, Path::new(path))?;
-            }
+            retain_checkout(leases, Path::new(&entry.plugin_root))?;
         }
         Ok(entries)
     })
@@ -125,13 +127,8 @@ pub(crate) fn retain_startup(leases: &mut Leases, restored_cwds: &[PathBuf]) -> 
 pub(crate) fn cleanup() -> io::Result<()> {
     crate::persist::plugin_registry::read(|entries| {
         for installation in installations()? {
-            let checkout = installation.join("checkout");
             if entries.iter().any(|entry| {
-                entry.source.managed_path.as_deref().is_some_and(|path| {
-                    let path = Path::new(path);
-                    path == checkout
-                        || path.canonicalize().ok().as_deref() == Some(checkout.as_path())
-                })
+                lease_path(Path::new(&entry.plugin_root)).as_ref() == Some(&installation)
             }) {
                 continue;
             }
@@ -223,8 +220,7 @@ mod tests {
         with_config(|| {
             let (current, mut registered) = installation("example.current");
             // Registry paths and config paths can use different aliases.
-            registered.source.managed_path =
-                Some(current.join("checkout/../checkout").display().to_string());
+            registered.plugin_root = current.join("checkout/../checkout").display().to_string();
             let (retired, old) = installation("example.retired");
             let untracked =
                 crate::plugin_paths::create_managed_installation("example.legacy").unwrap();
@@ -275,6 +271,31 @@ mod tests {
             drop(mutation);
             cleanup().unwrap();
             assert!(!building.exists());
+
+            // Relinking a checkout subdirectory clears managed source metadata,
+            // but it still needs registry and running-server protection.
+            let (linked, mut local) = installation("example.linked");
+            let subdir = linked.join("checkout/subplugin");
+            std::fs::create_dir(&subdir).unwrap();
+            local.plugin_root = subdir.display().to_string();
+            local.source = Default::default();
+            crate::persist::plugin_registry::update(|entries| *entries = vec![local]).unwrap();
+            cleanup().unwrap();
+            assert!(
+                subdir.exists(),
+                "registered local roots protect their files"
+            );
+            let mut server = Leases::new();
+            load(&mut server).unwrap();
+            crate::persist::plugin_registry::update(Vec::clear).unwrap();
+            cleanup().unwrap();
+            assert!(
+                subdir.exists(),
+                "unlinked local roots retain live server protection"
+            );
+            drop(server);
+            cleanup().unwrap();
+            assert!(!linked.exists());
         });
     }
 

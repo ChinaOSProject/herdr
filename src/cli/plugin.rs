@@ -392,7 +392,11 @@ fn install_github_plugin(
                         final_checkout.display()
                     )));
                 }
-                if let Err(cleanup_err) = std::fs::remove_dir_all(&installation) {
+                if let Err(cleanup_err) =
+                    crate::persist::plugin_registry::with_registry_lock(|| {
+                        std::fs::remove_dir_all(&installation)
+                    })
+                {
                     return Err(io::Error::other(format!(
                         "{err}; could not remove failed installation at {}: {cleanup_err}",
                         installation.display()
