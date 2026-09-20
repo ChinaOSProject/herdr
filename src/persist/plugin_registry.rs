@@ -16,7 +16,9 @@ fn registry_lock_path() -> PathBuf {
     crate::config::config_dir().join(REGISTRY_LOCK_FILE)
 }
 
-fn with_registry_lock<T>(operation: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+pub(crate) fn with_registry_lock<T>(
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
     let lock_path = registry_lock_path();
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;

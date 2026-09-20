@@ -89,7 +89,7 @@ fn installations() -> io::Result<Vec<PathBuf>> {
 }
 
 pub(crate) fn retain_startup(leases: &mut Leases, restored_cwds: &[PathBuf]) -> io::Result<()> {
-    crate::persist::plugin_registry::read(|_| {
+    crate::persist::plugin_registry::with_registry_lock(|| {
         for installation in installations()? {
             if leases.contains_key(&installation) {
                 continue;
@@ -299,6 +299,26 @@ mod tests {
             cleanup().unwrap();
             assert!(!restored.exists());
             assert!(!handoff.exists());
+
+            // Corrupt registry contents disable plugins, not the server. The
+            // startup scan needs serialization, not registry deserialization.
+            let registry = crate::config::config_dir().join("plugins.json");
+            std::fs::write(&registry, "not json").unwrap();
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let app = crate::app::App::try_new(
+                &crate::config::Config::default(),
+                crate::app::AppPolicy {
+                    persist_plugin_registry: true,
+                    ..crate::app::AppPolicy::TEST
+                },
+                None,
+                rx,
+                crate::api::EventHub::default(),
+            )
+            .expect("corrupt registry must not prevent server startup");
+            assert!(app.state.installed_plugins.is_empty());
+            drop(app);
+            std::fs::remove_file(registry).unwrap();
 
             let broken =
                 crate::plugin_paths::create_managed_installation("example.broken").unwrap();
