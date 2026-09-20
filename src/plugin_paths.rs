@@ -19,6 +19,28 @@ pub(crate) fn managed_checkout_lock_path(plugin_id: &str) -> PathBuf {
     ))
 }
 
+pub(crate) fn managed_installations_dir(plugin_id: &str) -> PathBuf {
+    managed_plugins_dir()
+        .join("github-installations")
+        .join(crate::api::schema::plugin_managed_path_component(plugin_id))
+}
+
+pub(crate) fn create_managed_installation(plugin_id: &str) -> std::io::Result<PathBuf> {
+    let parent = managed_installations_dir(plugin_id);
+    std::fs::create_dir_all(&parent)?;
+    for generation in 0u64.. {
+        let path = parent.join(format!("{}-{generation}", std::process::id()));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::other(
+        "plugin installation directory exhausted",
+    ))
+}
+
 pub(crate) fn plugin_config_dir(plugin_id: &str) -> PathBuf {
     managed_plugins_dir()
         .join("config")
@@ -116,6 +138,38 @@ fn copy_dir_all(source: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installations_never_reuse_or_move_existing_files() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "herdr-installations-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &base);
+        let id = format!("example.generations-{}", std::process::id());
+        let first = create_managed_installation(&id).unwrap();
+        std::fs::write(first.join("keep"), "original").unwrap();
+        let second = create_managed_installation(&id).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(first.join("keep")).unwrap(),
+            "original"
+        );
+        std::fs::remove_dir_all(&first).unwrap();
+        std::fs::remove_dir_all(&second).unwrap();
+        std::fs::remove_dir(managed_installations_dir(&id)).unwrap();
+        match previous {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn plugin_config_path_component_is_readable_and_collision_free() {

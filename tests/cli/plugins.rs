@@ -332,6 +332,11 @@ fn plugin_update_refreshes_selected_then_all_github_plugins() {
         &["--session", "updates", "plugin", "list", "--json"],
     );
     assert_eq!(listed["result"]["plugins"][0]["enabled"], false);
+    let first_installation = PathBuf::from(
+        listed["result"]["plugins"][0]["plugin_root"]
+            .as_str()
+            .unwrap(),
+    );
     let offline_reinstall = run_named_cli_with_env(
         &config_home,
         &runtime_dir,
@@ -354,6 +359,13 @@ fn plugin_update_refreshes_selected_then_all_github_plugins() {
         &["--session", "updates", "plugin", "list", "--json"],
     );
     assert_eq!(listed["result"]["plugins"][0]["enabled"], false);
+    let second_installation = PathBuf::from(
+        listed["result"]["plugins"][0]["plugin_root"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_ne!(first_installation, second_installation);
+    assert!(first_installation.join("herdr-plugin.toml").exists());
     let malformed = run_named_cli(
         &config_home,
         &runtime_dir,
@@ -587,6 +599,224 @@ fn plugin_update_does_not_resurrect_a_plugin_unlinked_during_build() {
 
     let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", "race"]);
     drop(server);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn plugin_updates_preserve_running_consumers_and_failed_activation() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let source_repo = base.join("source");
+    create_committed_repo(&source_repo);
+    let manifest = r#"
+id = "example.live"
+name = "Live"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+[[actions]]
+id = "read"
+title = "Read"
+command = ["sh", "./read.sh", "action"]
+[[panes]]
+id = "read"
+title = "Read"
+placement = "tab"
+command = ["sh", "./read.sh", "pane"]
+"#;
+    fs::write(source_repo.join("herdr-plugin.toml"), manifest).unwrap();
+    fs::write(source_repo.join("version"), "old").unwrap();
+    fs::write(source_repo.join("read.sh"), r#"
+kind="$1"
+touch "$HERDR_PLUGIN_ROOT/ready-$kind"
+while [ ! -e "$HERDR_PLUGIN_ROOT/release" ]; do sleep 0.05; done
+printf '%s:%s' "$(cat version)" "$(cat "$HERDR_PLUGIN_ROOT/version")" > "$HERDR_PLUGIN_ROOT/result-$kind.tmp"
+mv "$HERDR_PLUGIN_ROOT/result-$kind.tmp" "$HERDR_PLUGIN_ROOT/result-$kind"
+"#).unwrap();
+    run_git(&source_repo, &["add", "."]);
+    run_git(&source_repo, &["commit", "--quiet", "-m", "old plugin"]);
+    let git_config = base.join("gitconfig");
+    fs::write(
+        &git_config,
+        format!(
+            "[url \"file://{}\"]\n    insteadOf = https://github.com/example/live.git\n",
+            source_repo.display()
+        ),
+    )
+    .unwrap();
+    let install = run_named_cli_with_env(
+        &config_home,
+        &runtime_dir,
+        &["plugin", "install", "example/live", "--yes"],
+        &[("GIT_CONFIG_GLOBAL", &git_config)],
+    );
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    // Model an existing installation from before generation directories.
+    let registry = config_home.join("herdr-dev/plugins.json");
+    let mut entries: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let installed_root = PathBuf::from(entries[0]["plugin_root"].as_str().unwrap());
+    let component = installed_root
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap();
+    let legacy_root = config_home.join("herdr-dev/plugins/github").join(component);
+    fs::create_dir_all(legacy_root.parent().unwrap()).unwrap();
+    fs::rename(&installed_root, &legacy_root).unwrap();
+    entries[0]["plugin_root"] = serde_json::json!(legacy_root);
+    entries[0]["manifest_path"] = serde_json::json!(legacy_root.join("herdr-plugin.toml"));
+    entries[0]["source"]["managed_path"] = serde_json::json!(legacy_root);
+    fs::write(&registry, serde_json::to_vec(&entries).unwrap()).unwrap();
+
+    let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
+    let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
+    for name in ["alpha", "beta"] {
+        wait_for_socket(
+            &named_session_socket(&config_home, name),
+            Duration::from_secs(5),
+        );
+    }
+    let socket = named_session_socket(&config_home, "alpha");
+    run_cli_json(
+        &socket,
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            base.to_str().unwrap(),
+            "--focus",
+        ],
+    );
+    let current_root = || {
+        let listed = run_named_cli_json(
+            &config_home,
+            &runtime_dir,
+            &["--session", "beta", "plugin", "list", "--json"],
+        );
+        PathBuf::from(
+            listed["result"]["plugins"][0]["plugin_root"]
+                .as_str()
+                .unwrap(),
+        )
+    };
+    let launch = || {
+        let action = run_named_cli_json(
+            &config_home,
+            &runtime_dir,
+            &[
+                "--session",
+                "beta",
+                "plugin",
+                "action",
+                "invoke",
+                "read",
+                "--plugin",
+                "example.live",
+            ],
+        );
+        assert_eq!(action["result"]["type"], "plugin_action_invoked");
+        let pane = run_cli_json(
+            &socket,
+            &[
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "example.live",
+                "--entrypoint",
+                "read",
+            ],
+        );
+        assert_eq!(pane["result"]["type"], "plugin_pane_opened");
+    };
+    let wait_file = |path: &Path| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(path.exists(), "missing {}", path.display());
+    };
+    let old_root = current_root();
+    launch();
+    for kind in ["action", "pane"] {
+        wait_file(&old_root.join(format!("ready-{kind}")));
+    }
+    fs::write(source_repo.join("version"), "new").unwrap();
+    run_git(&source_repo, &["add", "."]);
+    run_git(&source_repo, &["commit", "--quiet", "-m", "new plugin"]);
+    let update = run_named_cli_with_env(
+        &config_home,
+        &runtime_dir,
+        &["--session", "alpha", "plugin", "update", "--yes"],
+        &[("GIT_CONFIG_GLOBAL", &git_config)],
+    );
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let new_root = current_root();
+    assert_ne!(old_root, new_root);
+    launch();
+    for root in [&old_root, &new_root] {
+        fs::write(root.join("release"), "").unwrap();
+        for kind in ["action", "pane"] {
+            wait_file(&root.join(format!("result-{kind}")));
+        }
+    }
+    for kind in ["action", "pane"] {
+        assert_eq!(
+            fs::read_to_string(old_root.join(format!("result-{kind}"))).unwrap(),
+            "old:old"
+        );
+        assert_eq!(
+            fs::read_to_string(new_root.join(format!("result-{kind}"))).unwrap(),
+            "new:new"
+        );
+    }
+
+    // Fail registry activation after the build, preserving the working version
+    // and both running consumers' directories without a restore operation.
+    let registry = config_home.join("herdr-dev/plugins.json");
+    let original_registry = fs::read(&registry).unwrap();
+    let block_write = format!("mkdir '{}'", registry.with_extension("json.tmp").display());
+    fs::write(
+        source_repo.join("herdr-plugin.toml"),
+        format!(
+            "{manifest}\n[[build]]\ncommand = {}\n",
+            serde_json::to_string(&["sh", "-c", block_write.as_str()]).unwrap()
+        ),
+    )
+    .unwrap();
+    run_git(&source_repo, &["add", "."]);
+    run_git(
+        &source_repo,
+        &["commit", "--quiet", "-m", "fail activation"],
+    );
+    let failed = run_named_cli_with_env(
+        &config_home,
+        &runtime_dir,
+        &["--session", "alpha", "plugin", "update", "--yes"],
+        &[("GIT_CONFIG_GLOBAL", &git_config)],
+    );
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("plugin files retained at"));
+    assert_eq!(fs::read(&registry).unwrap(), original_registry);
+    assert_eq!(current_root(), new_root);
+    assert_eq!(fs::read_to_string(old_root.join("version")).unwrap(), "old");
+    assert_eq!(fs::read_to_string(new_root.join("version")).unwrap(), "new");
+    for name in ["alpha", "beta"] {
+        let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", name]);
+    }
+    drop((alpha, beta));
     cleanup_test_base(&base);
 }
 
@@ -847,8 +1077,8 @@ command = ["sh", "-c", "echo bootstrap"]
         String::from_utf8_lossy(&uninstall.stderr)
     );
     assert!(
-        !managed_path.exists(),
-        "managed checkout should be deleted on uninstall"
+        managed_path.exists(),
+        "uninstall must preserve files used by running plugins"
     );
 
     let listed = run_named_cli_json(
@@ -948,7 +1178,9 @@ command = ["sh", "-c", "echo should-not-install"]
     assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
 
     assert!(
-        path_missing_or_empty(&managed_github_plugin_dir(&config_home)),
+        fs::read_dir(managed_github_plugin_dir(&config_home))
+            .unwrap()
+            .all(|plugin| path_missing_or_empty(&plugin.unwrap().path())),
         "failed build should not leave managed checkouts"
     );
 
@@ -1141,382 +1373,10 @@ EOF
     assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
 
     assert!(
-        path_missing_or_empty(&managed_github_plugin_dir(&config_home)),
+        fs::read_dir(managed_github_plugin_dir(&config_home))
+            .unwrap()
+            .all(|plugin| path_missing_or_empty(&plugin.unwrap().path())),
         "manifest mutation should not leave managed checkouts"
-    );
-
-    cleanup_test_base(&base);
-}
-
-#[test]
-fn plugin_install_restores_previous_checkout_when_registration_fails() {
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let socket_path = runtime_dir.join("fake-herdr.sock");
-    let source_repo = base.join("source-repo");
-    let plugin_dir = source_repo.join("worktree-bootstrap");
-    fs::create_dir_all(&plugin_dir).unwrap();
-    create_committed_repo(&source_repo);
-    fs::write(
-        plugin_dir.join("herdr-plugin.toml"),
-        r#"
-id = "example.worktree-bootstrap"
-name = "Worktree Bootstrap"
-version = "0.2.0"
-min_herdr_version = "0.6.10"
-platforms = ["linux", "macos", "windows"]
-
-[[actions]]
-id = "bootstrap"
-title = "Bootstrap"
-command = ["sh", "-c", "echo new"]
-"#,
-    )
-    .unwrap();
-    run_git(
-        &source_repo,
-        &["add", "worktree-bootstrap/herdr-plugin.toml"],
-    );
-    run_git(&source_repo, &["commit", "--quiet", "-m", "add plugin"]);
-
-    fs::create_dir_all(&config_home).unwrap();
-    fs::create_dir_all(&runtime_dir).unwrap();
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
-    fs::create_dir_all(&managed_checkout).unwrap();
-    fs::write(managed_checkout.join("old-marker"), "old checkout\n").unwrap();
-
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
-
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    let managed_checkout_for_server = managed_checkout.clone();
-    let server = thread::spawn(move || {
-        let (mut first, first_line) = accept_fake_cli_operation(&listener);
-        let first_request: serde_json::Value = serde_json::from_str(&first_line).unwrap();
-        assert_eq!(first_request["method"], "plugin.list");
-        writeln!(
-            first,
-            "{}",
-            serde_json::json!({
-                "id": "cli:plugin",
-                "result": {
-                    "type": "plugin_list",
-                    "plugins": [{
-                        "plugin_id": "example.worktree-bootstrap",
-                        "name": "Worktree Bootstrap",
-                        "version": "0.1.0",
-                        "min_herdr_version": "0.6.10",
-                        "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
-                        "plugin_root": managed_checkout_for_server.display().to_string(),
-                        "enabled": true,
-                        "source": {
-                            "kind": "github",
-                            "owner": "ogulcancelik",
-                            "repo": "herdr-plugin-examples",
-                            "subdir": "worktree-bootstrap",
-                            "resolved_commit": "old",
-                            "managed_path": managed_checkout_for_server.display().to_string(),
-                            "installed_unix_ms": 1
-                        }
-                    }]
-                }
-            })
-        )
-        .unwrap();
-        first.flush().unwrap();
-
-        let (mut second, second_line) = accept_fake_cli_operation(&listener);
-        let second_request: serde_json::Value = serde_json::from_str(&second_line).unwrap();
-        assert_eq!(second_request["method"], "plugin.link");
-        second
-            .write_all(
-                br#"{"id":"cli:plugin","error":{"code":"plugin_registry_save_failed","message":"forced failure"}}"#,
-            )
-            .unwrap();
-        second.write_all(b"\n").unwrap();
-        second.flush().unwrap();
-    });
-
-    let install = run_named_cli_with_env_and_socket_override(
-        &config_home,
-        &runtime_dir,
-        &[
-            "plugin",
-            "install",
-            "ogulcancelik/herdr-plugin-examples/worktree-bootstrap",
-            "--yes",
-        ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
-        Some(&socket_path),
-    );
-    assert!(
-        !install.status.success(),
-        "install should fail when plugin.link fails"
-    );
-    server.join().unwrap();
-    assert!(
-        managed_checkout.join("old-marker").exists(),
-        "old checkout should be restored after registration failure"
-    );
-
-    cleanup_test_base(&base);
-}
-
-#[test]
-fn plugin_install_rejects_server_that_drops_source_metadata() {
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let socket_path = runtime_dir.join("fake-herdr.sock");
-    let source_repo = base.join("source-repo");
-    let plugin_dir = source_repo.join("worktree-bootstrap");
-    fs::create_dir_all(&plugin_dir).unwrap();
-    create_committed_repo(&source_repo);
-    fs::write(
-        plugin_dir.join("herdr-plugin.toml"),
-        r#"
-id = "example.worktree-bootstrap"
-name = "Worktree Bootstrap"
-version = "0.1.0"
-min_herdr_version = "0.6.10"
-platforms = ["linux", "macos", "windows"]
-
-[[actions]]
-id = "bootstrap"
-title = "Bootstrap"
-command = ["sh", "-c", "echo install"]
-"#,
-    )
-    .unwrap();
-    run_git(
-        &source_repo,
-        &["add", "worktree-bootstrap/herdr-plugin.toml"],
-    );
-    run_git(&source_repo, &["commit", "--quiet", "-m", "add plugin"]);
-
-    fs::create_dir_all(&config_home).unwrap();
-    fs::create_dir_all(&runtime_dir).unwrap();
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
-
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    let managed_checkout_for_server = managed_checkout.clone();
-    let server = thread::spawn(move || {
-        let (mut first, first_line) = accept_fake_cli_operation(&listener);
-        let first_request: serde_json::Value = serde_json::from_str(&first_line).unwrap();
-        assert_eq!(first_request["method"], "plugin.list");
-        first
-            .write_all(br#"{"id":"cli:plugin","result":{"type":"plugin_list","plugins":[]}}"#)
-            .unwrap();
-        first.write_all(b"\n").unwrap();
-        first.flush().unwrap();
-
-        let (mut second, second_line) = accept_fake_cli_operation(&listener);
-        let second_request: serde_json::Value = serde_json::from_str(&second_line).unwrap();
-        assert_eq!(second_request["method"], "plugin.link");
-        writeln!(
-            second,
-            "{}",
-            serde_json::json!({
-                "id": "cli:plugin",
-                "result": {
-                    "type": "plugin_linked",
-                    "plugin": {
-                        "plugin_id": "example.worktree-bootstrap",
-                        "name": "Worktree Bootstrap",
-                        "version": "0.1.0",
-                        "min_herdr_version": "0.6.10",
-                        "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
-                        "plugin_root": managed_checkout_for_server.display().to_string(),
-                        "enabled": true,
-                        "source": {"kind": "local"}
-                    }
-                }
-            })
-        )
-        .unwrap();
-        second.flush().unwrap();
-
-        let (mut third, third_line) = accept_fake_cli_operation(&listener);
-        let third_request: serde_json::Value = serde_json::from_str(&third_line).unwrap();
-        assert_eq!(third_request["method"], "plugin.unlink");
-        assert_eq!(
-            third_request["params"]["plugin_id"],
-            "example.worktree-bootstrap"
-        );
-        third
-            .write_all(
-                br#"{"id":"cli:plugin","result":{"type":"plugin_unlinked","plugin_id":"example.worktree-bootstrap","removed":true}}"#,
-            )
-            .unwrap();
-        third.write_all(b"\n").unwrap();
-        third.flush().unwrap();
-    });
-
-    let install = run_named_cli_with_env_and_socket_override(
-        &config_home,
-        &runtime_dir,
-        &[
-            "plugin",
-            "install",
-            "ogulcancelik/herdr-plugin-examples/worktree-bootstrap",
-            "--yes",
-        ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
-        Some(&socket_path),
-    );
-    assert!(
-        !install.status.success(),
-        "install should fail when server drops GitHub source metadata"
-    );
-    server.join().unwrap();
-    assert!(
-        !managed_checkout.exists(),
-        "new checkout should be removed after incompatible plugin.link response"
-    );
-
-    cleanup_test_base(&base);
-}
-
-#[test]
-fn plugin_install_keeps_checkout_when_incompatible_server_cleanup_fails() {
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let socket_path = runtime_dir.join("fake-herdr.sock");
-    let source_repo = base.join("source-repo");
-    let plugin_dir = source_repo.join("worktree-bootstrap");
-    fs::create_dir_all(&plugin_dir).unwrap();
-    create_committed_repo(&source_repo);
-    fs::write(
-        plugin_dir.join("herdr-plugin.toml"),
-        r#"
-id = "example.worktree-bootstrap"
-name = "Worktree Bootstrap"
-version = "0.1.0"
-min_herdr_version = "0.6.10"
-platforms = ["linux", "macos", "windows"]
-
-[[actions]]
-id = "bootstrap"
-title = "Bootstrap"
-command = ["sh", "-c", "echo install"]
-"#,
-    )
-    .unwrap();
-    run_git(
-        &source_repo,
-        &["add", "worktree-bootstrap/herdr-plugin.toml"],
-    );
-    run_git(&source_repo, &["commit", "--quiet", "-m", "add plugin"]);
-
-    fs::create_dir_all(&config_home).unwrap();
-    fs::create_dir_all(&runtime_dir).unwrap();
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
-
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    let managed_checkout_for_server = managed_checkout.clone();
-    let server = thread::spawn(move || {
-        let (mut first, _first_line) = accept_fake_cli_operation(&listener);
-        first
-            .write_all(br#"{"id":"cli:plugin","result":{"type":"plugin_list","plugins":[]}}"#)
-            .unwrap();
-        first.write_all(b"\n").unwrap();
-        first.flush().unwrap();
-
-        let (mut second, _second_line) = accept_fake_cli_operation(&listener);
-        writeln!(
-            second,
-            "{}",
-            serde_json::json!({
-                "id": "cli:plugin",
-                "result": {
-                    "type": "plugin_linked",
-                    "plugin": {
-                        "plugin_id": "example.worktree-bootstrap",
-                        "name": "Worktree Bootstrap",
-                        "version": "0.1.0",
-                        "min_herdr_version": "0.6.10",
-                        "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
-                        "plugin_root": managed_checkout_for_server.display().to_string(),
-                        "enabled": true,
-                        "source": {"kind": "local"}
-                    }
-                }
-            })
-        )
-        .unwrap();
-        second.flush().unwrap();
-
-        let (mut third, third_line) = accept_fake_cli_operation(&listener);
-        let third_request: serde_json::Value = serde_json::from_str(&third_line).unwrap();
-        assert_eq!(third_request["method"], "plugin.unlink");
-        third
-            .write_all(
-                br#"{"id":"cli:plugin","error":{"code":"plugin_registry_save_failed","message":"forced unlink failure"}}"#,
-            )
-            .unwrap();
-        third.write_all(b"\n").unwrap();
-        third.flush().unwrap();
-    });
-
-    let install = run_named_cli_with_env_and_socket_override(
-        &config_home,
-        &runtime_dir,
-        &[
-            "plugin",
-            "install",
-            "ogulcancelik/herdr-plugin-examples/worktree-bootstrap",
-            "--yes",
-        ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
-        Some(&socket_path),
-    );
-    assert!(
-        !install.status.success(),
-        "install should fail when source metadata is dropped and cleanup fails"
-    );
-    server.join().unwrap();
-    assert!(
-        managed_checkout.exists(),
-        "checkout should stay when server cleanup fails"
     );
 
     cleanup_test_base(&base);

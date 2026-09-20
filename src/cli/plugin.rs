@@ -313,7 +313,6 @@ fn install_github_plugin(
                 )));
             }
         }
-        let final_checkout = crate::plugin_paths::managed_checkout_path(&preview_plugin.plugin_id);
         let _checkout_lock = lock_managed_checkout(&preview_plugin.plugin_id)?;
         let existing = installed_plugin_info(&preview_plugin.plugin_id)?;
         if let Some(expected) = updating_plugin {
@@ -345,54 +344,57 @@ fn install_github_plugin(
             );
             return Ok(0);
         }
-        if let Err(err) = run_plugin_build_commands(&preview_plugin, &manifest_root) {
-            eprintln!(
-                "{err}\n\nPlugin was not {}.",
-                if updating { "updated" } else { "installed" }
-            );
-            return Ok(1);
-        }
-        let post_build_plugin = load_cli_plugin_manifest(&manifest_root, enabled)?;
-        ensure_manifest_unchanged_after_build(&preview_plugin, &post_build_plugin)?;
-
-        let backup_checkout = temp_root.join("previous-checkout");
-        let mut backup_moved = false;
-        if final_checkout.exists() {
-            std::fs::rename(&final_checkout, &backup_checkout)
-                .map_err(|err| plugin_checkout_lifecycle_error("replace", &final_checkout, err))?;
-            backup_moved = true;
-        }
+        let installation =
+            crate::plugin_paths::create_managed_installation(&preview_plugin.plugin_id)?;
+        let final_checkout = installation.join("checkout");
+        let mut activation_attempted = false;
         let install_attempt = (|| {
-            if let Some(parent) = final_checkout.parent() {
-                std::fs::create_dir_all(parent).map_err(InstallFailure::Rollback)?;
-            }
-            std::fs::rename(&checkout, &final_checkout)
-                .map_err(|err| plugin_checkout_lifecycle_error("install", &final_checkout, err))
-                .map_err(InstallFailure::Rollback)?;
-
-            source_info.managed_path = Some(final_checkout.display().to_string());
+            std::fs::rename(&checkout, &final_checkout)?;
             let final_manifest_root = source.manifest_root(&final_checkout);
-            let mut plugin = load_cli_plugin_manifest(&final_manifest_root, enabled)
-                .map_err(InstallFailure::Rollback)?;
-            plugin.source = source_info.clone();
+            let mut preview_plugin = preview_plugin.clone();
+            let relocated_plugin = load_cli_plugin_manifest(&final_manifest_root, enabled)?;
+            preview_plugin.manifest_path = relocated_plugin.manifest_path;
+            preview_plugin.plugin_root = relocated_plugin.plugin_root;
+            run_plugin_build_commands(&preview_plugin, &final_manifest_root).map_err(|err| {
+                io::Error::other(format!(
+                    "{err}\n\nPlugin was not {}.",
+                    if updating { "updated" } else { "installed" }
+                ))
+            })?;
+            let mut plugin = load_cli_plugin_manifest(&final_manifest_root, enabled)?;
+            ensure_manifest_unchanged_after_build(&preview_plugin, &plugin)?;
+            source_info.managed_path = Some(final_checkout.display().to_string());
+            plugin.source = source_info;
+            activation_attempted = true;
             if let Some(expected) = updating_plugin {
-                persist_updated_plugin(&plugin, expected).map_err(InstallFailure::Rollback)?;
+                persist_updated_plugin(&plugin, expected)?;
             } else {
-                register_installed_plugin(plugin.clone(), source_info.clone())?;
+                persist_plugin_offline(&plugin, true)?;
             }
-            Ok::<InstalledPluginInfo, InstallFailure>(plugin)
+            Ok::<InstalledPluginInfo, io::Error>(plugin)
         })();
         let plugin = match install_attempt {
             Ok(plugin) => plugin,
-            Err(InstallFailure::Rollback(err)) => {
-                let _ = std::fs::remove_dir_all(&final_checkout);
-                if backup_moved && backup_checkout.exists() {
-                    let _ = std::fs::rename(&backup_checkout, &final_checkout);
+            Err(err) => {
+                // A failed activation may have published the path. Never delete files
+                // that a server or a plugin process could already be using.
+                if activation_attempted {
+                    return Err(io::Error::other(format!(
+                        "{err}; plugin files retained at {}",
+                        final_checkout.display()
+                    )));
+                }
+                if let Err(cleanup_err) = std::fs::remove_dir_all(&installation) {
+                    return Err(io::Error::other(format!(
+                        "{err}; could not remove failed installation at {}: {cleanup_err}",
+                        installation.display()
+                    )));
                 }
                 return Err(err);
             }
-            Err(InstallFailure::KeepCheckout(err)) => return Err(err),
         };
+        // ponytail: retain old installations, including across uninstall. Reclaim
+        // them only once plugin process lifetimes can be tracked reliably.
         println!(
             "{} {} from {}.",
             if updating { "Updated" } else { "Installed" },
@@ -472,9 +474,6 @@ fn plugin_uninstall(args: &[String]) -> std::io::Result<i32> {
         Err(err) => return Err(err),
     }
 
-    if let Some(plugin) = existing.as_ref() {
-        remove_managed_plugin_files(plugin)?;
-    }
     println!("Uninstalled {plugin_id}.");
     Ok(0)
 }
@@ -1149,99 +1148,6 @@ fn persist_updated_plugin(
     }
 }
 
-fn register_installed_plugin(
-    plugin: InstalledPluginInfo,
-    source: PluginSourceInfo,
-) -> Result<(), InstallFailure> {
-    let request = Request {
-        id: "cli:plugin".into(),
-        method: Method::PluginLink(PluginLinkParams {
-            path: plugin.manifest_path.clone(),
-            enabled: plugin.enabled,
-            source: Some(source.clone()),
-        }),
-    };
-    match super::send_request(&request) {
-        Ok(response) => {
-            if response.get("error").is_some() {
-                return Err(InstallFailure::Rollback(std::io::Error::other(
-                    serde_json::to_string(&response).unwrap(),
-                )));
-            }
-            if let Err(err) =
-                verify_plugin_link_source_response(response, &plugin.plugin_id, &source)
-            {
-                let unlink = super::send_request(&Request {
-                    id: "cli:plugin".into(),
-                    method: Method::PluginUnlink(PluginUnlinkParams {
-                        plugin_id: plugin.plugin_id.clone(),
-                    }),
-                });
-                match unlink {
-                    Ok(response) if response.get("error").is_none() => {
-                        return Err(InstallFailure::Rollback(err));
-                    }
-                    Ok(response) => {
-                        return Err(InstallFailure::KeepCheckout(std::io::Error::other(
-                            format!(
-                                "{err}; failed to undo incompatible plugin registration: {}",
-                                serde_json::to_string(&response).unwrap()
-                            ),
-                        )));
-                    }
-                    Err(unlink_err) if super::protocol_mismatch_was_reported(&unlink_err) => {
-                        return Err(InstallFailure::KeepCheckout(unlink_err));
-                    }
-                    Err(unlink_err) => {
-                        return Err(InstallFailure::KeepCheckout(std::io::Error::other(
-                            format!(
-                                "{err}; failed to undo incompatible plugin registration: {unlink_err}"
-                            ),
-                        )));
-                    }
-                }
-            }
-            Ok(())
-        }
-        Err(err) if is_connection_error(&err) => {
-            persist_plugin_offline(&plugin, true).map_err(InstallFailure::Rollback)
-        }
-        Err(err) => Err(InstallFailure::Rollback(err)),
-    }
-}
-
-#[derive(Debug)]
-enum InstallFailure {
-    Rollback(std::io::Error),
-    KeepCheckout(std::io::Error),
-}
-
-fn verify_plugin_link_source_response(
-    response: serde_json::Value,
-    plugin_id: &str,
-    expected: &PluginSourceInfo,
-) -> std::io::Result<()> {
-    let parsed: SuccessResponse =
-        serde_json::from_value(response).map_err(std::io::Error::other)?;
-    let ResponseResult::PluginLinked { plugin } = parsed.result else {
-        return Err(std::io::Error::other("expected plugin_linked response"));
-    };
-    if plugin.plugin_id != plugin_id
-        || plugin.source.kind != PluginSourceKind::Github
-        || plugin.source.owner != expected.owner
-        || plugin.source.repo != expected.repo
-        || plugin.source.subdir != expected.subdir
-        || plugin.source.requested_ref != expected.requested_ref
-        || plugin.source.resolved_commit != expected.resolved_commit
-        || plugin.source.managed_path != expected.managed_path
-    {
-        return Err(std::io::Error::other(
-            "running Herdr server did not persist GitHub plugin source metadata",
-        ));
-    }
-    Ok(())
-}
-
 fn installed_plugin_info(plugin_id: &str) -> std::io::Result<Option<InstalledPluginInfo>> {
     match live_installed_plugin_info(plugin_id) {
         Ok(plugin) => Ok(plugin),
@@ -1827,51 +1733,6 @@ fn lock_managed_checkout(plugin_id: &str) -> std::io::Result<std::fs::File> {
         .open(lock_path)?;
     lock.lock()?;
     Ok(lock)
-}
-
-fn remove_managed_plugin_files(plugin: &InstalledPluginInfo) -> std::io::Result<()> {
-    if plugin.source.kind != PluginSourceKind::Github {
-        return Ok(());
-    }
-    let Some(path) = plugin.source.managed_path.as_deref() else {
-        return Ok(());
-    };
-    let path = PathBuf::from(path);
-    if !path.exists() {
-        return Ok(());
-    }
-    if !is_expected_managed_path(plugin, &path) {
-        return Err(std::io::Error::other(format!(
-            "refusing to delete unmanaged plugin path: {}",
-            path.display()
-        )));
-    }
-    std::fs::remove_dir_all(&path)
-        .map_err(|err| plugin_checkout_lifecycle_error("remove", &path, err))
-}
-
-fn plugin_checkout_lifecycle_error(operation: &str, path: &Path, err: io::Error) -> io::Error {
-    if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied {
-        return io::Error::new(
-            err.kind(),
-            format!(
-                "failed to {operation} managed plugin checkout at {}; close any Herdr plugin panes or plugin commands using that checkout, then retry: {err}",
-                path.display()
-            ),
-        );
-    }
-    err
-}
-
-fn is_expected_managed_path(plugin: &InstalledPluginInfo, path: &Path) -> bool {
-    let Ok(path) = path.canonicalize() else {
-        return false;
-    };
-    let expected = crate::plugin_paths::managed_checkout_path(&plugin.plugin_id);
-    let Ok(expected) = expected.canonicalize() else {
-        return false;
-    };
-    path == expected
 }
 
 fn current_unix_ms() -> u64 {
