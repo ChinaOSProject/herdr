@@ -406,6 +406,7 @@ impl App {
             crate::plugin_installations::retain_startup(
                 &mut plugin_installation_leases,
                 &restored_cwds,
+                false,
             )?;
         }
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
@@ -688,6 +689,11 @@ impl App {
             config_diagnostic,
             api_rx,
             event_hub,
+        )?;
+        crate::plugin_installations::retain_startup(
+            &mut app.plugin_installation_leases,
+            &[],
+            true,
         )?;
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,

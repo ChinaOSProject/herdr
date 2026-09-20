@@ -90,7 +90,11 @@ fn installations() -> io::Result<Vec<PathBuf>> {
     Ok(result)
 }
 
-pub(crate) fn retain_startup(leases: &mut Leases, restored_cwds: &[PathBuf]) -> io::Result<()> {
+pub(crate) fn retain_startup(
+    leases: &mut Leases,
+    restored_cwds: &[PathBuf],
+    handoff: bool,
+) -> io::Result<()> {
     crate::persist::plugin_registry::with_registry_lock(|| {
         for installation in installations()? {
             if leases.contains_key(&installation) {
@@ -110,6 +114,9 @@ pub(crate) fn retain_startup(leases: &mut Leases, restored_cwds: &[PathBuf]) -> 
                     .unwrap_or_else(|_| cwd.clone())
                     .starts_with(installation.join("checkout"))
             });
+            if !referenced && !handoff {
+                continue;
+            }
             match file.try_lock() {
                 Ok(()) if !referenced => continue,
                 Ok(()) => file.unlock()?,
@@ -166,6 +173,13 @@ pub(crate) fn cleanup() -> io::Result<()> {
             // Windows cannot remove the open lease file. Registry + mutation
             // locks exclude new readers/installers while the handle is closed.
             drop(lease);
+            // Keep the marker if removing checkout files fails so a later
+            // cleanup can retry (for example, an open Windows build artifact).
+            match std::fs::remove_dir_all(installation.join("checkout")) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
             std::fs::remove_dir_all(&installation)?;
         }
         Ok(())
@@ -296,6 +310,18 @@ mod tests {
             drop(server);
             cleanup().unwrap();
             assert!(!linked.exists());
+
+            let (retry, _) = installation("example.retry");
+            std::fs::remove_dir_all(retry.join("checkout")).unwrap();
+            std::fs::write(retry.join("checkout"), "not a directory").unwrap();
+            assert!(cleanup().is_err());
+            assert!(
+                retry.join(LEASE_FILE).exists(),
+                "failed cleanup remains tracked"
+            );
+            std::fs::remove_file(retry.join("checkout")).unwrap();
+            cleanup().unwrap();
+            assert!(!retry.exists(), "a later cleanup retries the installation");
         });
     }
 
@@ -310,8 +336,14 @@ mod tests {
                 .open(handoff.join(LEASE_FILE))
                 .unwrap();
             outgoing.lock_shared().unwrap();
+            let mut unrelated = Leases::new();
+            retain_startup(&mut unrelated, &[], false).unwrap();
+            assert!(
+                unrelated.is_empty(),
+                "ordinary startup must not inherit other servers' pins"
+            );
             let mut incoming = Leases::new();
-            retain_startup(&mut incoming, &[restored.join("checkout")]).unwrap();
+            retain_startup(&mut incoming, &[restored.join("checkout")], true).unwrap();
             drop(outgoing);
             cleanup().unwrap();
             assert!(restored.exists());
