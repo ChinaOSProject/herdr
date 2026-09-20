@@ -191,7 +191,13 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    install_github_plugin(source, requested_ref, yes, true, None)
+    match install_github_plugin(source, requested_ref, yes, true, None) {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            eprintln!("{err}");
+            Ok(1)
+        }
+    }
 }
 
 fn plugin_update(args: &[String]) -> std::io::Result<i32> {
