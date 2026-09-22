@@ -54,6 +54,8 @@ pub struct WorktreeRemoveResult {
 
 #[derive(Debug)]
 pub struct WorktreeReadResult {
+    // Keep the slot until completion is consumed, including time queued on the app loop.
+    pub(crate) _permit: tokio::sync::OwnedSemaphorePermit,
     pub(crate) client_local: bool,
     pub(crate) request: crate::api::schema::Request,
     pub(crate) source_workspace_id: Option<String>,

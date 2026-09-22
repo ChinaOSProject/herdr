@@ -77,6 +77,18 @@ impl App {
             return encode_error(id, "worktree_not_found", "worktree cannot be opened");
         }
         let canonical_path = crate::worktree::canonical_or_original(&entry.path);
+        let target_matches =
+            crate::workspace::git_space_metadata(&entry.path).is_some_and(|space| {
+                space.key == source.repo_key
+                    && space.checkout_key == canonical_path.display().to_string()
+            });
+        if !target_matches {
+            return encode_error(
+                id,
+                "worktree_not_found",
+                "worktree checkout changed during discovery; retry the request",
+            );
+        }
         let canonical_source = crate::worktree::canonical_or_original(&source.source_checkout_path);
         let target_is_source = canonical_path == canonical_source;
         let already_open = self.open_workspace_idx_for_checkout(&canonical_path);
@@ -1479,6 +1491,132 @@ mod tests {
 
         let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
         crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn deferred_worktree_open_rejects_removed_or_replaced_target() {
+        for replacement in ["missing", "directory", "repository"] {
+            let repo = create_committed_repo("api-stale-target-source");
+            let checkout = unique_temp_path("api-stale-target");
+            run_git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "stale-target",
+                    checkout.to_str().unwrap(),
+                ],
+            );
+            let mut app = app_with_parent(&repo);
+            let (respond_to, response_rx) = response_channel();
+            let source_id = app.state.workspaces[0].id.clone();
+            app.handle_deferred_worktree_api_request(
+                Request {
+                    id: "stale-target".into(),
+                    method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                        workspace_id: Some(source_id),
+                        branch: Some("stale-target".into()),
+                        label: Some("must not rename".into()),
+                        focus: true,
+                        ..Default::default()
+                    }),
+                },
+                respond_to,
+                false,
+            );
+            let completion = wait_for_app_event(&mut app);
+            run_git(&repo, &["worktree", "remove", checkout.to_str().unwrap()]);
+            match replacement {
+                "directory" => std::fs::create_dir_all(&checkout).unwrap(),
+                "repository" => {
+                    let other_repo = create_committed_repo("api-stale-target-replacement");
+                    std::fs::rename(other_repo, &checkout).unwrap();
+                }
+                _ => {}
+            }
+            let mut unrelated = Workspace::test_new("unrelated");
+            unrelated.identity_cwd = checkout.clone();
+            app.state.workspaces.push(unrelated);
+            app.state.ensure_test_terminals();
+            app.handle_internal_event(completion);
+            let response: ErrorResponse = serde_json::from_str(
+                &response_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response.error.code, "worktree_not_found", "{replacement}");
+            assert_eq!(app.state.workspaces.len(), 2);
+            assert_eq!(app.state.active, Some(0));
+            assert!(app
+                .state
+                .workspaces
+                .iter()
+                .all(|ws| ws.worktree_space().is_none()));
+            app.state.assert_invariants_for_test();
+            let _ = std::fs::remove_dir_all(checkout);
+            let _ = std::fs::remove_dir_all(repo);
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_worktree_reads_bound_running_and_queued_discovery() {
+        let repo = create_committed_repo("api-read-limit");
+        let mut app = app_with_parent(&repo);
+        app.worktree_read_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let source_id = app.state.workspaces[0].id.clone();
+        let request = |open| Request {
+            id: "read-limit".into(),
+            method: if open {
+                crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    workspace_id: Some(source_id.clone()),
+                    path: Some(repo.display().to_string()),
+                    ..Default::default()
+                })
+            } else {
+                crate::api::schema::Method::WorktreeList(WorktreeListParams {
+                    workspace_id: Some(source_id.clone()),
+                    ..Default::default()
+                })
+            },
+        };
+        let (entered, release) = crate::worktree::test_list_gate::block(&repo);
+        let (respond_to, response_rx) = response_channel();
+        app.handle_deferred_worktree_api_request(request(false), respond_to, false);
+        entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let assert_busy = |app: &mut App| {
+            for open in [false, true] {
+                let (respond_to, response_rx) = response_channel();
+                app.handle_deferred_worktree_api_request(request(open), respond_to, false);
+                let response: ErrorResponse = serde_json::from_str(
+                    &response_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(response.error.code, "worktree_busy");
+            }
+        };
+        assert_busy(&mut app);
+        release.send(()).unwrap();
+        let completion = wait_for_app_event(&mut app);
+        assert_busy(&mut app);
+        app.handle_internal_event(completion);
+        let _: SuccessResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(app.worktree_read_slots.available_permits(), 1);
+        let response = run_deferred_api_request(&mut app, request(false));
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.worktree_read_slots.available_permits(), 1);
         let _ = std::fs::remove_dir_all(repo);
     }
 

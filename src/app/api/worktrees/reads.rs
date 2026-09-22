@@ -171,46 +171,66 @@ impl App {
                 return;
             }
         };
+        let Ok(permit) = self.worktree_read_slots.clone().try_acquire_owned() else {
+            let _ = respond_to.send(encode_error(
+                request.id,
+                "worktree_busy",
+                "too many worktree checks are pending; retry shortly",
+            ));
+            return;
+        };
         let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let source_cwd = input.cwd.clone();
-            let mut source_workspace_id = None;
-            let result = input
-                .resolve(allow_linked, trust_repository)
-                .and_then(|(workspace_id, source)| {
-                    source_workspace_id = workspace_id;
-                    let mut entries = crate::worktree::list_existing_worktrees(
-                        &source.source_repo_root,
-                        trust_repository,
-                    )
-                    .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
-                    if let Method::WorktreeOpen(params) = &request.method {
-                        entries = vec![find_worktree_entry(
+        let spawn_error_response = respond_to.clone();
+        let request_id = request.id.clone();
+        let spawned = std::thread::Builder::new()
+            .name("worktree-read".into())
+            .spawn(move || {
+                let source_cwd = input.cwd.clone();
+                let mut source_workspace_id = None;
+                let result = input
+                    .resolve(allow_linked, trust_repository)
+                    .and_then(|(workspace_id, source)| {
+                        source_workspace_id = workspace_id;
+                        let mut entries = crate::worktree::list_existing_worktrees(
+                            &source.source_repo_root,
+                            trust_repository,
+                        )
+                        .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
+                        if let Method::WorktreeOpen(params) = &request.method {
+                            entries = vec![find_worktree_entry(
+                                entries,
+                                params.path.clone(),
+                                params.branch.clone(),
+                            )?];
+                        }
+                        Ok(WorktreeReadData {
+                            source_checkout_path: source.source_checkout_path,
+                            source_repo_root: source.source_repo_root,
+                            repo_key: source.repo_key,
+                            repo_name: source.repo_name,
                             entries,
-                            params.path.clone(),
-                            params.branch.clone(),
-                        )?];
-                    }
-                    Ok(WorktreeReadData {
-                        source_checkout_path: source.source_checkout_path,
-                        source_repo_root: source.source_repo_root,
-                        repo_key: source.repo_key,
-                        repo_name: source.repo_name,
-                        entries,
+                        })
                     })
-                })
-                .map_err(|err| (err.code.to_string(), err.message));
-            let _ = event_tx.blocking_send(AppEvent::WorktreeReadFinished(Box::new(
-                WorktreeReadResult {
-                    request,
-                    client_local,
-                    source_workspace_id,
-                    source_cwd,
-                    result,
-                    respond_to,
-                },
-            )));
-        });
+                    .map_err(|err| (err.code.to_string(), err.message));
+                let _ = event_tx.blocking_send(AppEvent::WorktreeReadFinished(Box::new(
+                    WorktreeReadResult {
+                        _permit: permit,
+                        request,
+                        client_local,
+                        source_workspace_id,
+                        source_cwd,
+                        result,
+                        respond_to,
+                    },
+                )));
+            });
+        if let Err(err) = spawned {
+            let _ = spawn_error_response.send(encode_error(
+                request_id,
+                "worktree_list_failed",
+                format!("could not start worktree discovery: {err}"),
+            ));
+        }
     }
 
     pub(crate) fn handle_api_worktree_read_finished(&mut self, result: WorktreeReadResult) {
