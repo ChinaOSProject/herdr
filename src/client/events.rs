@@ -2,10 +2,6 @@ use super::*;
 
 /// Internal events for the client event loop.
 pub(super) enum ClientLoopEvent {
-    OwnedInput {
-        epoch: u64,
-        event: Box<ClientLoopEvent>,
-    },
     #[cfg(unix)]
     StdinInput(Vec<u8>),
     #[cfg(unix)]
@@ -34,6 +30,5 @@ pub(super) enum ClientLoopEvent {
         /// latest target have the same identity after restoration.
         force: bool,
     },
-    SshAuth(shell::SshAuthCommand),
     Timer,
 }

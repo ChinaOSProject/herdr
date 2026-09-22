@@ -6,17 +6,6 @@
 #[cfg(unix)]
 pub(crate) mod ssh_agent;
 
-#[cfg(unix)]
-pub(crate) use unix_common::configure_authentication_pty;
-
-// Interactive authentication recovery is unsupported on non-Unix platforms.
-#[cfg(not(unix))]
-pub(crate) fn configure_authentication_pty(
-    _master: &dyn portable_pty::MasterPty,
-) -> std::io::Result<()> {
-    Ok(())
-}
-
 pub(crate) struct HostShutdownMonitor {
     task: Option<tokio::task::JoinHandle<()>>,
 }

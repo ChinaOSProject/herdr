@@ -74,48 +74,42 @@ fn state_with_remote() -> (ClientShellState, ClientEndpointId) {
 }
 
 #[test]
-fn opening_auth_invalidates_deferred_copy_completions() {
-    let (mut state, remote) = state_with_remote();
-    let generation = state.copy_session_generation;
-    state.copy_operation_in_flight = true;
-    state.open_auth_popup(remote);
-    assert!(!state.copy_operation_in_flight);
-    assert!(state.copy_session_generation > generation);
-    assert!(state.copy_input_queue.is_empty());
-    assert!(state.copy_operation_queue.is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn auth_closure_discards_separately_queued_input_from_the_previous_epoch() {
-    use crate::client::events::ClientLoopEvent;
-    use std::sync::atomic::Ordering;
-
-    let (shell, remote) = state_with_remote();
-    let mut client = crate::client::state::ClientState::test_new();
-    client.shell = Some(shell);
-    client.shell.as_mut().unwrap().open_auth_popup(remote);
-    client.sync_auth_input_epoch();
-    let auth_epoch = client.input_epoch.load(Ordering::Acquire);
-    let queued = [b"otp".to_vec(), b"\x1b[200~secret\x1b[201~".to_vec()].map(|bytes| {
-        ClientLoopEvent::OwnedInput {
-            epoch: auth_epoch,
-            event: Box::new(ClientLoopEvent::StdinInput(bytes)),
-        }
-    });
-
-    // Either verified connection or cancellation can close the popup before stdin
-    // queued on another producer lane is dispatched.
-    client.shell.as_mut().unwrap().close_auth_popup();
-    client.sync_auth_input_epoch();
-    for event in queued {
-        assert!(client.accept_input_epoch(event).is_none());
+fn machine_diagnostic_badge_reopens_notice_without_collapsing_machine() {
+    let (mut state, id) = state_with_remote();
+    state.set_endpoint_status(&id, ClientEndpointStatus::Attention);
+    state.set_machine_diagnostic(&id, "Permission denied (keyboard-interactive)".into());
+    for _ in 0..2 {
+        state.compose(120, 40).unwrap();
+        let hit = state
+            .hits
+            .machines
+            .iter()
+            .find(|hit| hit.endpoint_id == id)
+            .unwrap();
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.status_badge.x,
+            row: hit.status_badge.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        assert!(outcome.repaint);
+        assert!(!state.collapsed_endpoints.contains(&id));
+        let notice = state.visible_endpoint_notice.take().unwrap();
+        assert!(notice.body.contains("Permission denied"));
+        assert!(notice
+            .title
+            .contains("herdr machine reconnect 0123456789abcdef0123456789abcdef"));
     }
-    let fresh = ClientLoopEvent::OwnedInput {
-        epoch: client.input_epoch.load(Ordering::Acquire),
-        event: Box::new(ClientLoopEvent::StdinInput(b"normal input".to_vec())),
-    };
-    assert!(client.accept_input_epoch(fresh).is_some());
+    state.set_endpoint_status(&id, ClientEndpointStatus::Online);
+    state.compose(120, 40).unwrap();
+    assert!(!state.machine_diagnostics.required_for(
+        state
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == id)
+            .unwrap()
+    ));
 }
 
 fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
@@ -2596,301 +2590,4 @@ fn navigator_foreign_workspace_heading_keeps_the_workspace_target() {
             target: Some(ClientEndpointFocusTarget::Workspace(workspace_id)),
         }] if activated == &endpoint_id && workspace_id == "ws_1"
     ));
-}
-
-#[test]
-fn ssh_auth_badge_is_separate_and_modal() {
-    let (mut state, remote) = state_with_remote();
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Attention);
-    state.set_endpoint_auth_required(&remote, true);
-    state.compose(100, 30).unwrap();
-    let badge = state
-        .auth_badges()
-        .into_iter()
-        .find(|(_, id)| *id == &remote)
-        .unwrap()
-        .0;
-    let collapsed = state.collapsed_endpoints.clone();
-    let outcome = state.handle_raw_events(vec![
-        RawInputEvent::Mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: badge.x,
-            row: badge.y,
-            modifiers: KeyModifiers::NONE,
-        }),
-        RawInputEvent::Paste("must not replay".into()),
-    ]);
-    assert_eq!(state.collapsed_endpoints, collapsed);
-    assert_eq!(state.auth_popup_endpoint(), Some(&remote));
-    assert!(outcome.requests.is_empty());
-    assert!(matches!(
-        outcome.actions.as_slice(),
-        [ClientShellAction::SshAuth(SshAuthCommand::Start { .. })]
-    ));
-    let mut events = crate::raw_input::parse_raw_input_bytes_sync(b"\x1b");
-    events.push(RawInputEvent::Paste("secret".into()));
-    let outcome = state.handle_raw_events(events);
-    assert!(outcome.requests.is_empty());
-    assert!(matches!(
-        outcome.actions.as_slice(),
-        [ClientShellAction::SshAuth(SshAuthCommand::Cancel)]
-    ));
-    assert!(state.auth_popup_endpoint().is_some());
-}
-
-#[test]
-fn ssh_auth_attention_requires_flag_and_resizes() {
-    let (mut state, remote) = state_with_remote();
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Attention);
-    state.compose(100, 30).unwrap();
-    assert!(state.auth_badges().next().is_none());
-    state.set_endpoint_auth_required(&remote, true);
-    assert_eq!(state.auth_badges().count(), 1);
-    state.open_auth_popup(remote.clone());
-    state.compose(100, 30).unwrap();
-    let size = state.auth_popup_size().unwrap();
-    state.compose(80, 24).unwrap();
-    assert_ne!(state.auth_popup_size().unwrap(), size);
-    state.compose(1, 1).unwrap();
-    assert_eq!(state.auth_popup_size(), Some((1, 1)));
-    state.auth_popup_failed("error\x1b\x07".into());
-    assert!(state.handle_input_bytes(b"secret").requests.is_empty());
-    state.close_auth_popup();
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
-    state.compose(100, 30).unwrap();
-    assert!(state.auth_badges().next().is_none());
-}
-
-#[test]
-fn ssh_auth_hover_collapsed_badge_and_other_row_clicks() {
-    let (mut state, remote) = state_with_remote();
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Attention);
-    state.set_endpoint_auth_required(&remote, true);
-    for collapsed in [false, true] {
-        state.sidebar_collapsed = collapsed;
-        let frame = state.compose(100, 30).unwrap();
-        let badge = state
-            .auth_badges()
-            .into_iter()
-            .find(|(_, id)| *id == &remote)
-            .unwrap()
-            .0;
-        let index = usize::from(badge.y) * 100 + usize::from(badge.x);
-        let before = frame.cells[index].clone();
-        let outcome =
-            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-                kind: MouseEventKind::Moved,
-                column: badge.x,
-                row: badge.y,
-                modifiers: KeyModifiers::NONE,
-            })]);
-        assert!(outcome.repaint);
-        assert!(outcome.actions.is_empty());
-        assert!(state.auth_popup_endpoint().is_none());
-        let after = state.compose(100, 30).unwrap();
-        assert_ne!(before, after.cells[index]);
-        let toggle = state
-            .hits
-            .machines
-            .iter()
-            .find(|hit| hit.endpoint_id == remote)
-            .unwrap()
-            .collapse_toggle;
-        let outcome =
-            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: toggle.x,
-                row: toggle.y,
-                modifiers: KeyModifiers::NONE,
-            })]);
-        assert!(outcome.actions.is_empty());
-        assert!(state.auth_popup_endpoint().is_none());
-        assert!(state.collapsed_endpoints.contains(&remote));
-        state.collapsed_endpoints.remove(&remote);
-        state.compose(100, 30).unwrap();
-        let outcome =
-            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: badge.x,
-                row: badge.y,
-                modifiers: KeyModifiers::NONE,
-            })]);
-        assert!(matches!(
-            outcome.actions.as_slice(),
-            [ClientShellAction::SshAuth(SshAuthCommand::Start { .. })]
-        ));
-        state.close_auth_popup();
-    }
-}
-
-#[test]
-fn ssh_auth_input_never_reaches_existing_server_popup() {
-    let (mut state, remote) = state_with_remote();
-    state.set_pane_surface(surface_with_popup());
-    state.compose(100, 30).unwrap();
-    assert!(state.hits.popup.is_some());
-    state.open_auth_popup(remote);
-    let outcome = state.handle_raw_events(vec![
-        RawInputEvent::Text(crate::input::TextCommit::new("123")),
-        RawInputEvent::Paste("456".into()),
-    ]);
-    assert!(outcome.requests.is_empty());
-    assert!(
-        matches!(outcome.actions.as_slice(), [ClientShellAction::SshAuth(SshAuthCommand::Input(bytes))] if bytes == b"123456")
-    );
-    let outcome = state.handle_input_bytes(b"\r");
-    assert!(outcome.requests.is_empty());
-    assert!(
-        matches!(outcome.actions.as_slice(), [ClientShellAction::SshAuth(SshAuthCommand::Input(bytes))] if bytes == b"\r")
-    );
-    let outcome =
-        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        })]);
-    assert!(outcome.requests.is_empty());
-    assert!(outcome.actions.is_empty());
-    state.auth_popup_verifying();
-    let outcome = state.handle_input_bytes(b"secret");
-    assert!(outcome.requests.is_empty());
-    assert!(outcome.actions.is_empty());
-}
-
-#[test]
-fn ssh_auth_unavailable_projection_and_close_do_not_replay_input() {
-    let (mut state, remote) = state_with_remote();
-    state.open_auth_popup(remote);
-    assert!(state.clipboard_image_target().is_none());
-    state.pane_surface = None;
-    state.update_auth_popup("Private prompt\x07".into(), Some((0, 0)));
-    let frame = state.compose(100, 30).unwrap();
-    let text: String = frame
-        .cells
-        .iter()
-        .map(|cell| cell.symbol.as_str())
-        .collect();
-    assert!(text.contains("Private prompt"));
-    assert!(!text.contains('\x07'));
-    let mut events = crate::raw_input::parse_raw_input_bytes_sync(b"\x1b");
-    events.push(RawInputEvent::Paste("must disappear".into()));
-    let outcome = state.handle_raw_events(events);
-    assert!(outcome.requests.is_empty());
-    assert!(matches!(
-        outcome.actions.as_slice(),
-        [ClientShellAction::SshAuth(SshAuthCommand::Cancel)]
-    ));
-    state.close_auth_popup();
-    let outcome = state.handle_raw_events(Vec::new());
-    assert!(outcome.requests.is_empty());
-    assert!(outcome.actions.is_empty());
-    assert!(state.auth_popup_endpoint().is_none());
-}
-
-#[test]
-fn ssh_auth_full_badge_text_is_right_aligned_and_clickable() {
-    let (mut state, remote) = state_with_remote();
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Attention);
-    state.set_endpoint_auth_required(&remote, true);
-    for width in [100, 80] {
-        let frame = state.compose(width, 30).unwrap();
-        let hit = state
-            .hits
-            .machines
-            .iter()
-            .find(|hit| hit.endpoint_id == remote)
-            .unwrap();
-        let badge = hit.status_badge;
-        assert_eq!(badge.width, 6);
-        assert_eq!(badge.right(), hit.rect.right());
-        let rendered: String = (badge.x..badge.right())
-            .map(|x| {
-                frame.cells[usize::from(badge.y) * usize::from(width) + usize::from(x)]
-                    .symbol
-                    .as_str()
-            })
-            .collect();
-        assert_eq!(rendered, "! auth");
-        let collapsed = state.collapsed_endpoints.clone();
-        let outcome =
-            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: badge.right() - 1,
-                row: badge.y,
-                modifiers: KeyModifiers::NONE,
-            })]);
-        assert!(matches!(
-            outcome.actions.as_slice(),
-            [ClientShellAction::SshAuth(SshAuthCommand::Start { .. })]
-        ));
-        assert_eq!(state.collapsed_endpoints, collapsed);
-        state.close_auth_popup();
-    }
-}
-
-#[test]
-fn ssh_auth_badge_does_not_click_through_other_modals() {
-    let (mut state, remote) = state_with_remote();
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Attention);
-    state.set_endpoint_auth_required(&remote, true);
-    state.compose(100, 30).unwrap();
-    let badge = state.auth_badges().next().unwrap().0;
-    for popup in [false, true] {
-        if popup {
-            state.overlay = None;
-            state.set_pane_surface(surface_with_popup());
-        } else {
-            state.overlay = Some(ClientShellOverlay::Onboarding);
-        }
-        state.compose(100, 30).unwrap();
-        let outcome =
-            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: badge.x,
-                row: badge.y,
-                modifiers: KeyModifiers::NONE,
-            })]);
-        assert!(state.auth_popup_endpoint().is_none());
-        assert!(!outcome
-            .actions
-            .iter()
-            .any(|action| matches!(action, ClientShellAction::SshAuth(_))));
-    }
-}
-
-#[test]
-fn ssh_auth_explains_hidden_input_only_while_authenticating() {
-    let (mut state, remote) = state_with_remote();
-    state.compose(100, 30).unwrap();
-    state.open_auth_popup(remote);
-    let text = |frame: crate::protocol::FrameData| -> String {
-        frame
-            .cells
-            .iter()
-            .map(|cell| cell.symbol.as_str())
-            .collect()
-    };
-    assert!(text(state.compose(100, 30).unwrap())
-        .contains("Your input is hidden. Type your code and press Enter."));
-    assert!(text(state.compose(28, 40).unwrap()).contains("Enter."));
-    state.auth_popup_verifying();
-    assert!(!text(state.compose(100, 30).unwrap()).contains("Your input is hidden"));
-}
-
-#[test]
-fn ssh_auth_failure_keeps_terminal_reason_visible() {
-    let (mut state, remote) = state_with_remote();
-    state.compose(100, 30).unwrap();
-    state.open_auth_popup(remote);
-    state.update_auth_popup("Permission denied: wrong OTP\n\n\n".into(), None);
-    state.auth_popup_failed("SSH exited unsuccessfully".into());
-    let frame = state.compose(100, 30).unwrap();
-    let text: String = frame
-        .cells
-        .iter()
-        .map(|cell| cell.symbol.as_str())
-        .collect();
-    assert!(text.contains("Permission denied: wrong OTP"));
-    assert!(text.contains("SSH exited unsuccessfully"));
 }

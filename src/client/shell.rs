@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 mod actions;
-mod auth;
-pub(crate) use auth::SshAuthCommand;
 mod agent_sidebar;
 mod aggregate_navigation;
+mod machine_diagnostics;
 mod workspace_navigation;
 use workspace_navigation::{PendingWorkspaceHighlight, WorkspaceNavigationTarget};
 mod composition;

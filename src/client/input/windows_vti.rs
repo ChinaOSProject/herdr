@@ -1,7 +1,7 @@
 #[cfg(windows)]
 use std::collections::VecDeque;
 #[cfg(windows)]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use std::sync::Arc;
 #[cfg(windows)]
@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::windows_client_input_event_from_raw;
 #[cfg(windows)]
-use super::{ClientLoopEvent, InputEpoch};
+use super::ClientLoopEvent;
 use crate::input::WindowsKeyRecord;
 
 #[cfg(windows)]
@@ -20,38 +20,16 @@ pub(super) fn raw_console_reader_loop(
     handle: windows_sys::Win32::Foundation::HANDLE,
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
-    input_epoch: Arc<AtomicU64>,
 ) {
     let mut mapper = WindowsInputMapper::default();
     let mut pump = WindowsInputPump::default();
     let mut handoff = WindowsInputHandoff::default();
-    let mut batch_epoch = InputEpoch(0);
 
     while !should_quit.load(Ordering::Acquire) {
         let mut trace = windows_input_trace_enabled().then(WindowsInputTraceBatch::default);
-        let previous_epoch = batch_epoch;
-        let pending = mapper.has_pending_input() || pump.has_pending_input();
-        let items = windows_console_input_items(
-            handle,
-            &mut mapper,
-            trace.as_mut(),
-            &input_epoch,
-            &mut batch_epoch,
-            pending,
-        );
-        if batch_epoch != previous_epoch {
-            // Drop raw VT/paste fragments before parsing the new owner's records.
-            pump = WindowsInputPump::default();
-        }
-        match items {
+        match windows_console_input_items(handle, &mut mapper, trace.as_mut()) {
             WindowsInputItems::Items(items) => {
-                process_platform_input_items(
-                    items,
-                    &mut pump,
-                    &mut handoff,
-                    trace.as_mut(),
-                    batch_epoch,
-                );
+                process_platform_input_items(items, &mut pump, &mut handoff, trace.as_mut());
             }
             WindowsInputItems::Idle => {
                 process_platform_input_items(
@@ -59,9 +37,8 @@ pub(super) fn raw_console_reader_loop(
                     &mut pump,
                     &mut handoff,
                     trace.as_mut(),
-                    batch_epoch,
                 );
-                push_platform_input_events(pump.idle(), &mut handoff, trace.as_mut(), batch_epoch);
+                push_platform_input_events(pump.idle(), &mut handoff, trace.as_mut());
             }
             WindowsInputItems::Closed => return,
         }
@@ -100,15 +77,9 @@ fn process_platform_input_items(
     pump: &mut WindowsInputPump,
     handoff: &mut WindowsInputHandoff,
     mut trace: Option<&mut WindowsInputTraceBatch>,
-    batch_epoch: InputEpoch,
 ) {
     for item in items {
-        push_platform_input_events(
-            pump.process(item),
-            handoff,
-            trace.as_deref_mut(),
-            batch_epoch,
-        );
+        push_platform_input_events(pump.process(item), handoff, trace.as_deref_mut());
     }
 }
 
@@ -117,7 +88,6 @@ fn push_platform_input_events(
     events: Vec<crate::protocol::ClientInputEvent>,
     handoff: &mut WindowsInputHandoff,
     trace: Option<&mut WindowsInputTraceBatch>,
-    batch_epoch: InputEpoch,
 ) {
     if events.is_empty() {
         return;
@@ -125,7 +95,7 @@ fn push_platform_input_events(
     if let Some(trace) = trace {
         trace.mapped_event_groups.push(events.clone());
     }
-    handoff.push(events, batch_epoch);
+    handoff.push(events);
 }
 
 #[cfg(windows)]
@@ -161,20 +131,20 @@ struct WindowsInputTraceBatch {
 #[cfg(windows)]
 #[derive(Default)]
 struct WindowsInputHandoff {
-    pending: VecDeque<(InputEpoch, Vec<crate::protocol::ClientInputEvent>)>,
+    pending: VecDeque<Vec<crate::protocol::ClientInputEvent>>,
     backpressured: bool,
 }
 
 #[cfg(windows)]
 impl WindowsInputHandoff {
-    fn push(&mut self, events: Vec<crate::protocol::ClientInputEvent>, epoch: InputEpoch) {
+    fn push(&mut self, events: Vec<crate::protocol::ClientInputEvent>) {
         if events.is_empty() {
             return;
         }
         if self.backpressured {
-            self.push_backpressured(events, epoch);
+            self.push_backpressured(events);
         } else {
-            self.pending.push_back((epoch, events));
+            self.pending.push_back(events);
         }
     }
 
@@ -188,17 +158,17 @@ impl WindowsInputHandoff {
             }
             match event_tx.try_reserve() {
                 Ok(permit) => {
-                    let Some((epoch, events)) = self.pending.pop_front() else {
+                    let Some(events) = self.pending.pop_front() else {
                         continue;
                     };
-                    permit.send(epoch.own(ClientLoopEvent::StdinEvents(events)));
+                    permit.send(ClientLoopEvent::StdinEvents(events));
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     if !self.backpressured {
                         self.backpressured = true;
                         let pending = std::mem::take(&mut self.pending);
-                        for (epoch, events) in pending {
-                            self.push_backpressured(events, epoch);
+                        for events in pending {
+                            self.push_backpressured(events);
                         }
                     }
                     return true;
@@ -208,22 +178,16 @@ impl WindowsInputHandoff {
         }
     }
 
-    fn push_backpressured(
-        &mut self,
-        events: Vec<crate::protocol::ClientInputEvent>,
-        epoch: InputEpoch,
-    ) {
-        if let Some((previous_epoch, previous)) = self.pending.back_mut() {
+    fn push_backpressured(&mut self, events: Vec<crate::protocol::ClientInputEvent>) {
+        if let Some(previous) = self.pending.back_mut() {
             if let ([previous_event], [next_event]) = (previous.as_slice(), events.as_slice()) {
-                if *previous_epoch == epoch
-                    && windows_mouse_motion_can_replace(previous_event, next_event)
-                {
+                if windows_mouse_motion_can_replace(previous_event, next_event) {
                     *previous = events;
                     return;
                 }
             }
         }
-        self.pending.push_back((epoch, events));
+        self.pending.push_back(events);
     }
 }
 
@@ -266,30 +230,18 @@ fn windows_console_input_items(
     handle: windows_sys::Win32::Foundation::HANDLE,
     mapper: &mut WindowsInputMapper,
     mut trace: Option<&mut WindowsInputTraceBatch>,
-    input_epoch: &AtomicU64,
-    batch_epoch: &mut InputEpoch,
-    pending: bool,
 ) -> WindowsInputItems {
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 258;
 
-    let candidate = InputEpoch::capture(input_epoch);
     match unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(handle, 10) } {
         WAIT_OBJECT_0 => {}
-        WAIT_TIMEOUT => {
-            let next = batch_epoch.after_poll(candidate, false, pending);
-            if next != *batch_epoch {
-                *mapper = WindowsInputMapper::default();
-                *batch_epoch = next;
-            }
-            return WindowsInputItems::Idle;
-        }
+        WAIT_TIMEOUT => return WindowsInputItems::Idle,
         _ => return WindowsInputItems::Closed,
     }
 
     let mut records = [windows_sys::Win32::System::Console::INPUT_RECORD::default(); 64];
     let mut read = 0;
-    // Never adopt on readiness: records already queued may be old auth input.
     let ok = unsafe {
         windows_sys::Win32::System::Console::ReadConsoleInputW(
             handle,
@@ -434,12 +386,6 @@ enum WindowsWin32InputModeItem {
 }
 
 impl WindowsInputPump {
-    fn has_pending_input(&self) -> bool {
-        self.framer.has_pending_input()
-            || self.pending_physical_escape.is_some()
-            || self.default_mouse_candidate.active
-    }
-
     fn process(&mut self, item: PlatformInputItem) -> Vec<crate::protocol::ClientInputEvent> {
         let mut events = Vec::new();
         if let Some((escape, open_bracket)) = self.pending_physical_escape.take() {
@@ -734,12 +680,6 @@ struct WindowsMouseButtons {
 }
 
 impl WindowsInputMapper {
-    fn has_pending_input(&self) -> bool {
-        self.pending_high_surrogate.is_some()
-            || self.pending_paste_high_surrogate.is_some()
-            || !self.win32_input.buffer.is_empty()
-    }
-
     fn idle(&mut self) -> Vec<PlatformInputItem> {
         self.win32_input
             .flush_timeout()
@@ -1655,39 +1595,6 @@ mod tests {
         .collect()
     }
 
-    #[test]
-    fn native_pending_paste_keeps_old_owner_through_completion_batch() {
-        use crate::client::input_epoch::InputEpoch;
-        let mut mapper = WindowsInputMapper::default();
-        let mut pump = WindowsInputPump::default();
-        let original = InputEpoch(5);
-        assert!(pump
-            .process(PlatformInputItem::Bytes(b"\x1b[200~secret".to_vec()))
-            .is_empty());
-        let completion = original.after_poll(
-            InputEpoch(6),
-            true,
-            mapper.has_pending_input() || pump.has_pending_input(),
-        );
-        assert_eq!(completion, original);
-        let events = pump.process(PlatformInputItem::Bytes(
-            b"remaining-secret\x1b[201~new".to_vec(),
-        ));
-        assert!(!events.is_empty());
-        assert!(!pump.has_pending_input());
-        assert_eq!(
-            completion.after_poll(InputEpoch(6), false, false),
-            InputEpoch(6)
-        );
-        // Incomplete UTF-16 and nested VT records also retain their owner.
-        mapper.pending_high_surrogate = Some(0xd800);
-        assert!(mapper.has_pending_input());
-        assert_eq!(
-            original.after_poll(InputEpoch(6), true, mapper.has_pending_input()),
-            original
-        );
-    }
-
     #[cfg(windows)]
     #[test]
     fn windows_input_trace_preserves_mapped_event_groups() {
@@ -1702,65 +1609,12 @@ mod tests {
         let mut handoff = WindowsInputHandoff::default();
 
         for events in &groups {
-            push_platform_input_events(
-                events.clone(),
-                &mut handoff,
-                Some(&mut trace),
-                InputEpoch(0),
-            );
+            push_platform_input_events(events.clone(), &mut handoff, Some(&mut trace));
         }
-        push_platform_input_events(Vec::new(), &mut handoff, Some(&mut trace), InputEpoch(0));
+        push_platform_input_events(Vec::new(), &mut handoff, Some(&mut trace));
 
         assert_eq!(trace.mapped_event_groups, groups);
-        assert_eq!(
-            handoff.pending,
-            groups
-                .into_iter()
-                .map(|events| (InputEpoch(0), events))
-                .collect::<VecDeque<_>>()
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_handoff_retains_epoch_across_backpressure_and_modal_close() {
-        use crate::protocol::{ClientInputEvent, ClientMouseKind};
-        let epoch = AtomicU64::new(3);
-        let stamp = InputEpoch::capture(&epoch);
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(ClientLoopEvent::Timer).unwrap();
-        let mut handoff = WindowsInputHandoff::default();
-        handoff.push(vec![ClientInputEvent::TextCommit("cancel".into())], stamp);
-        handoff.push(vec![ClientInputEvent::TextCommit("secret".into())], stamp);
-        assert!(handoff.try_flush(&tx));
-        epoch.fetch_add(1, Ordering::AcqRel);
-        assert!(matches!(rx.try_recv(), Ok(ClientLoopEvent::Timer)));
-        for _ in 0..2 {
-            assert!(handoff.try_flush(&tx));
-            assert!(matches!(
-                rx.try_recv(),
-                Ok(ClientLoopEvent::OwnedInput { epoch: 3, .. })
-            ));
-        }
-        let motion = || {
-            vec![ClientInputEvent::Mouse {
-                kind: ClientMouseKind::Moved,
-                column: 1,
-                row: 1,
-                modifiers: 0,
-            }]
-        };
-        tx.try_send(ClientLoopEvent::Timer).unwrap();
-        handoff.push(motion(), stamp);
-        assert!(handoff.try_flush(&tx));
-        handoff.push(motion(), InputEpoch::capture(&epoch));
-        assert_eq!(
-            handoff.pending.len(),
-            2,
-            "motion coalescing must not cross owners"
-        );
-        assert_eq!(handoff.pending[0].0, stamp);
-        assert_eq!(handoff.pending[1].0, InputEpoch(4));
+        assert_eq!(handoff.pending, VecDeque::from(groups));
     }
 
     #[cfg(windows)]
@@ -1810,7 +1664,7 @@ mod tests {
             shortcut_release.clone(),
             text.clone(),
         ] {
-            handoff.push(vec![event], InputEpoch(0));
+            handoff.push(vec![event]);
         }
 
         assert!(handoff.try_flush(&event_tx));
@@ -1829,7 +1683,7 @@ mod tests {
             expected
                 .iter()
                 .cloned()
-                .map(|event| (InputEpoch(0), vec![event]))
+                .map(|event| vec![event])
                 .collect::<VecDeque<_>>()
         );
         assert!(matches!(event_rx.try_recv(), Ok(ClientLoopEvent::Timer)));
@@ -1838,10 +1692,7 @@ mod tests {
         let mut shortcut_preserved = false;
         while !handoff.pending.is_empty() {
             assert!(handoff.try_flush(&event_tx));
-            let Ok(ClientLoopEvent::OwnedInput { epoch: 0, event }) = event_rx.try_recv() else {
-                panic!("expected owned Windows input events");
-            };
-            let ClientLoopEvent::StdinEvents(events) = *event else {
+            let Ok(ClientLoopEvent::StdinEvents(events)) = event_rx.try_recv() else {
                 panic!("expected retained Windows input events");
             };
             assert_eq!(events.len(), 1, "logical input batches must stay separate");

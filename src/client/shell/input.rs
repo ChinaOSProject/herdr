@@ -157,17 +157,14 @@ impl ClientShellState {
     }
 
     pub(crate) fn handle_raw_events(&mut self, events: Vec<RawInputEvent>) -> ClientShellInput {
-        if self.auth_popup_endpoint().is_some() {
-            return self.handle_auth_input(events);
-        }
         let mut outcome = ClientShellInput::default();
         if !events.is_empty() && self.endpoint_error.take().is_some() {
             self.endpoint_error_deadline = None;
             outcome.repaint = true;
         }
         for event in events {
-            if self.handle_auth_badge_event(&event, &mut outcome) {
-                break;
+            if self.handle_machine_badge_event(&event, &mut outcome) {
+                continue;
             }
             if let Some(update) = host_theme_update(&event) {
                 push_host_theme_update(&mut outcome.requests, update);
@@ -443,9 +440,6 @@ impl ClientShellState {
     }
 
     pub(super) fn modal_paste_target_active(&self) -> bool {
-        if self.auth_popup_endpoint().is_some() {
-            return false;
-        }
         if self.popup_pending
             || self.popup_input_target().is_some()
             || (self.overlay.is_none()
@@ -983,9 +977,6 @@ impl ClientShellState {
     pub(crate) fn clipboard_image_target(
         &self,
     ) -> Option<crate::protocol::ClientClipboardImageTarget> {
-        if self.auth_popup_endpoint().is_some() {
-            return None;
-        }
         if matches!(
             self.overlay,
             Some(

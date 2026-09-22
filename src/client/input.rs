@@ -10,18 +10,17 @@
 //! - We avoid duplicating parsing logic in the client
 //! - Host terminal control replies can be buffered or discarded before they leak
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[cfg(unix)]
-use std::io;
+use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(windows)]
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use super::input_epoch::InputEpoch;
 use super::ClientLoopEvent;
 
 #[cfg(any(windows, test))]
@@ -47,7 +46,6 @@ pub fn stdin_reader_loop(
     initial_host_input: Vec<u8>,
     #[cfg(unix)] direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
     #[cfg(unix)] direct_response_active: Arc<AtomicBool>,
-    input_epoch: Arc<AtomicU64>,
 ) {
     #[cfg(windows)]
     {
@@ -58,7 +56,7 @@ pub fn stdin_reader_loop(
             host_sgr_pixels_active,
         );
         let _ = (host_escape_disambiguation_active, initial_host_input);
-        windows_stdin_reader_loop(event_tx, should_quit, input_epoch);
+        windows_stdin_reader_loop(event_tx, should_quit);
     }
 
     #[cfg(unix)]
@@ -73,7 +71,6 @@ pub fn stdin_reader_loop(
         initial_host_input,
         direct_response,
         direct_response_active,
-        input_epoch,
     );
 }
 
@@ -89,49 +86,24 @@ fn unix_stdin_reader_loop(
     initial_host_input: Vec<u8>,
     direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
     direct_response_active: Arc<AtomicBool>,
-    input_epoch: Arc<AtomicU64>,
 ) {
     let stdin = io::stdin();
-    unix_input_reader_loop(
-        &stdin,
-        event_tx,
-        should_quit,
-        (host_color_query_sent, host_cell_size_query_sent),
-        host_mouse_capture_active,
-        host_sgr_pixels_active,
-        host_escape_disambiguation_active,
-        initial_host_input,
-        direct_response,
-        direct_response_active,
-        input_epoch,
-    );
-}
-
-#[cfg(unix)]
-fn unix_input_reader_loop<R: AsRawFd>(
-    reader: &R,
-    event_tx: mpsc::Sender<ClientLoopEvent>,
-    should_quit: &Arc<AtomicBool>,
-    (host_color_query_sent, host_cell_size_query_sent): (bool, bool),
-    host_mouse_capture_active: Arc<AtomicBool>,
-    host_sgr_pixels_active: Arc<AtomicBool>,
-    host_escape_disambiguation_active: bool,
-    initial_host_input: Vec<u8>,
-    direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
-    direct_response_active: Arc<AtomicBool>,
-    input_epoch: Arc<AtomicU64>,
-) {
+    let mut reader = stdin.lock();
     let mut scratch = [0u8; 4096];
-    let mut framer = unix_input_framer(
-        host_escape_disambiguation_active,
-        host_color_query_sent,
-        host_cell_size_query_sent,
-    );
+    let mut framer = crate::raw_input::RawInputByteFramer::for_host_input();
+    framer.set_host_escape_disambiguation_active(host_escape_disambiguation_active);
+    if host_color_query_sent {
+        framer.host_color_query_sent();
+        framer.enable_host_color_scheme_change_tracking();
+        framer.enable_host_appearance_query_on_focus();
+    }
+    if host_cell_size_query_sent {
+        framer.host_cell_size_query_sent();
+    }
     let mut pending_palette = Vec::new();
     let mut pending_mode = None;
     let mut last_geometry = None;
     let mut direct_filter = super::direct_graphics::InputFilter::default();
-    let mut batch_epoch = InputEpoch(0);
 
     if !initial_host_input.is_empty() {
         let sgr_pixels = host_sgr_pixels_active.load(Ordering::Acquire);
@@ -142,7 +114,6 @@ fn unix_input_reader_loop<R: AsRawFd>(
         if !send_unix_input_chunks(
             chunks,
             &event_tx,
-            batch_epoch,
             &mut pending_palette,
             sgr_pixels,
             last_geometry,
@@ -151,7 +122,7 @@ fn unix_input_reader_loop<R: AsRawFd>(
         }
         if (framer.has_pending_input() || !pending_palette.is_empty())
             && stdin_read_ready(
-                reader,
+                &reader,
                 idle_flush_timeout_ms(&framer, host_mouse_capture_active.load(Ordering::Acquire)),
             ) == Some(false)
         {
@@ -161,21 +132,19 @@ fn unix_input_reader_loop<R: AsRawFd>(
             if !send_unix_input_chunks(
                 chunks,
                 &event_tx,
-                batch_epoch,
                 &mut pending_palette,
                 sgr_pixels,
                 last_geometry,
-            ) || !flush_unix_palette_input(&event_tx, batch_epoch, &mut pending_palette)
+            ) || !flush_unix_palette_input(&event_tx, &mut pending_palette)
             {
                 return;
             }
             if held_escape
-                && stdin_read_ready(reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
+                && stdin_read_ready(&reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
                     == Some(false)
                 && !send_unix_input_chunks(
                     framer.flush_timeout(),
                     &event_tx,
-                    batch_epoch,
                     &mut pending_palette,
                     sgr_pixels,
                     last_geometry,
@@ -189,7 +158,7 @@ fn unix_input_reader_loop<R: AsRawFd>(
 
     while !should_quit.load(Ordering::Acquire) {
         if direct_filter.has_pending()
-            && stdin_read_ready(reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
+            && stdin_read_ready(&reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
                 == Some(false)
         {
             let released = direct_response
@@ -198,7 +167,7 @@ fn unix_input_reader_loop<R: AsRawFd>(
                 .and_then(|mut matcher| direct_filter.flush_if_inactive(&mut matcher));
             if let Some(data) = released {
                 if event_tx
-                    .blocking_send(batch_epoch.own(ClientLoopEvent::StdinInput(data)))
+                    .blocking_send(ClientLoopEvent::StdinInput(data))
                     .is_err()
                 {
                     return;
@@ -206,37 +175,7 @@ fn unix_input_reader_loop<R: AsRawFd>(
             }
             continue;
         }
-        // Privacy boundary: readable kernel bytes keep their existing owner.
-        // Adopt only a candidate captured BEFORE an observed no-data boundary;
-        // otherwise a modal close between poll/read could promote queued secrets.
-        let candidate = InputEpoch::capture(&input_epoch);
-        match stdin_read_ready(reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS) {
-            Some(true) => {}
-            Some(false) => {
-                let next = batch_epoch.after_poll(
-                    candidate,
-                    false,
-                    framer.has_pending_input()
-                        || direct_filter.has_pending()
-                        || !pending_palette.is_empty(),
-                );
-                if next != batch_epoch {
-                    framer = unix_input_framer(
-                        host_escape_disambiguation_active,
-                        host_color_query_sent,
-                        host_cell_size_query_sent,
-                    );
-                    pending_mode = None;
-                    batch_epoch = next;
-                }
-                continue;
-            }
-            None => break,
-        }
-        // Poll and read the same kernel queue. StdinLock's 8 KiB read-ahead
-        // can otherwise hide credential bytes after a 4096-byte read, making
-        // an idle fd look like a safe ownership boundary before they drain.
-        match crate::platform::read_fd(reader.as_raw_fd(), &mut scratch) {
+        match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {
                 let sgr_pixels = *pending_mode
@@ -275,7 +214,6 @@ fn unix_input_reader_loop<R: AsRawFd>(
                 if !send_unix_input_chunks(
                     chunks,
                     &event_tx,
-                    batch_epoch,
                     &mut pending_palette,
                     sgr_pixels,
                     last_geometry,
@@ -287,7 +225,7 @@ fn unix_input_reader_loop<R: AsRawFd>(
                     &framer,
                     host_mouse_capture_active.load(Ordering::Acquire),
                 );
-                if stdin_read_ready(reader, timeout_ms) == Some(false) {
+                if stdin_read_ready(&reader, timeout_ms) == Some(false) {
                     let had_pending = framer.has_pending_input();
                     let chunks = framer.flush_timeout();
                     let held_escape = had_pending && chunks.is_empty();
@@ -299,17 +237,16 @@ fn unix_input_reader_loop<R: AsRawFd>(
                     if !send_unix_input_chunks(
                         chunks,
                         &event_tx,
-                        batch_epoch,
                         &mut pending_palette,
                         sgr_pixels,
                         last_geometry,
-                    ) || !flush_unix_palette_input(&event_tx, batch_epoch, &mut pending_palette)
+                    ) || !flush_unix_palette_input(&event_tx, &mut pending_palette)
                     {
                         return;
                     }
                     if held_escape
                         && stdin_read_ready(
-                            reader,
+                            &reader,
                             crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS,
                         ) == Some(false)
                     {
@@ -320,7 +257,6 @@ fn unix_input_reader_loop<R: AsRawFd>(
                         if !send_unix_input_chunks(
                             chunks,
                             &event_tx,
-                            batch_epoch,
                             &mut pending_palette,
                             sgr_pixels,
                             last_geometry,
@@ -338,25 +274,6 @@ fn unix_input_reader_loop<R: AsRawFd>(
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn unix_input_framer(
-    host_escape_disambiguation_active: bool,
-    host_color_query_sent: bool,
-    host_cell_size_query_sent: bool,
-) -> crate::raw_input::RawInputByteFramer {
-    let mut framer = crate::raw_input::RawInputByteFramer::for_host_input();
-    framer.set_host_escape_disambiguation_active(host_escape_disambiguation_active);
-    if host_color_query_sent {
-        framer.host_color_query_sent();
-        framer.enable_host_color_scheme_change_tracking();
-        framer.enable_host_appearance_query_on_focus();
-    }
-    if host_cell_size_query_sent {
-        framer.host_cell_size_query_sent();
-    }
-    framer
 }
 
 #[cfg(unix)]
@@ -381,7 +298,6 @@ fn filter_direct_input(
 fn send_unix_input_chunks(
     chunks: Vec<Vec<u8>>,
     event_tx: &mpsc::Sender<ClientLoopEvent>,
-    batch_epoch: InputEpoch,
     pending_palette: &mut Vec<Vec<u8>>,
     sgr_pixels: bool,
     geometry: Option<crate::input::mouse::HostGeometry>,
@@ -393,8 +309,7 @@ fn send_unix_input_chunks(
             .is_some();
         if palette_response {
             pending_palette.push(data);
-            if pending_palette.len() == 256
-                && !flush_unix_palette_input(event_tx, batch_epoch, pending_palette)
+            if pending_palette.len() == 256 && !flush_unix_palette_input(event_tx, pending_palette)
             {
                 return false;
             }
@@ -404,15 +319,13 @@ fn send_unix_input_chunks(
             .ok()
             .and_then(crate::terminal_theme::parse_default_color_response)
             .is_some();
-        if !default_color_response
-            && !flush_unix_palette_input(event_tx, batch_epoch, pending_palette)
-        {
+        if !default_color_response && !flush_unix_palette_input(event_tx, pending_palette) {
             return false;
         }
         let Some(event) = classify_unix_input(data, sgr_pixels, geometry) else {
             continue;
         };
-        if event_tx.blocking_send(batch_epoch.own(event)).is_err() {
+        if event_tx.blocking_send(event).is_err() {
             return false;
         }
     }
@@ -442,7 +355,6 @@ fn classify_unix_input(
 #[cfg(unix)]
 fn flush_unix_palette_input(
     event_tx: &mpsc::Sender<ClientLoopEvent>,
-    batch_epoch: InputEpoch,
     pending_palette: &mut Vec<Vec<u8>>,
 ) -> bool {
     if pending_palette.is_empty() {
@@ -450,7 +362,7 @@ fn flush_unix_palette_input(
     }
     let data = std::mem::take(pending_palette).concat();
     event_tx
-        .blocking_send(batch_epoch.own(ClientLoopEvent::StdinInput(data)))
+        .blocking_send(ClientLoopEvent::StdinInput(data))
         .is_ok()
 }
 
@@ -472,20 +384,19 @@ fn idle_flush_timeout_ms(
 fn windows_stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
-    input_epoch: Arc<AtomicU64>,
 ) {
     if !super::windows_vti_input_backend_enabled() {
         windows_vti::trace_input_transport("reader=crossterm");
-        windows_crossterm_reader_loop(event_tx, should_quit, input_epoch);
+        windows_crossterm_reader_loop(event_tx, should_quit);
     } else {
         match windows_vti::console_input_handle() {
             Ok(handle) => {
                 windows_vti::trace_input_transport("reader=windows-console");
-                windows_vti::raw_console_reader_loop(handle, event_tx, should_quit, input_epoch);
+                windows_vti::raw_console_reader_loop(handle, event_tx, should_quit);
             }
             _ => {
                 windows_vti::trace_input_transport("reader=crossterm-fallback");
-                windows_crossterm_reader_loop(event_tx, should_quit, input_epoch);
+                windows_crossterm_reader_loop(event_tx, should_quit);
             }
         }
     }
@@ -495,20 +406,16 @@ fn windows_stdin_reader_loop(
 fn windows_crossterm_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
-    input_epoch: Arc<AtomicU64>,
 ) {
     let mut framer = crate::raw_input::RawInputFramer::for_host_input();
-    let mut batch_epoch = InputEpoch(0);
 
     while !should_quit.load(Ordering::Acquire) {
-        let candidate = InputEpoch::capture(&input_epoch);
         match crossterm::event::poll(Duration::from_millis(10)) {
             Ok(true) => {}
             Ok(false) => {
-                batch_epoch = batch_epoch.after_poll(candidate, false, framer.has_pending_input());
                 if framer.has_pending_input() {
                     tracing::debug!("windows input raw sequence timed out; flushing");
-                    if !send_windows_raw_events(framer.flush_timeout(), &event_tx, batch_epoch) {
+                    if !send_windows_raw_events(framer.flush_timeout(), &event_tx) {
                         return;
                     }
                 }
@@ -517,20 +424,20 @@ fn windows_crossterm_reader_loop(
             Err(_) => break,
         }
 
-        // Readable input stays with the owner established at the last idle boundary.
         let event = match crossterm::event::read() {
             Ok(event) => event,
             Err(_) => break,
         };
+
         let (raw_events, event) = frame_windows_crossterm_event(&mut framer, event);
-        if !send_windows_raw_events(raw_events, &event_tx, batch_epoch) {
+        if !send_windows_raw_events(raw_events, &event_tx) {
             return;
         }
         let Some(event) = event else {
             continue;
         };
         if event_tx
-            .blocking_send(batch_epoch.own(ClientLoopEvent::StdinEvents(vec![event])))
+            .blocking_send(ClientLoopEvent::StdinEvents(vec![event]))
             .is_err()
         {
             return;
@@ -538,7 +445,7 @@ fn windows_crossterm_reader_loop(
     }
 
     if framer.has_pending_input() {
-        let _ = send_windows_raw_events(framer.flush_interrupted(), &event_tx, batch_epoch);
+        let _ = send_windows_raw_events(framer.flush_interrupted(), &event_tx);
     }
 }
 
@@ -663,7 +570,6 @@ fn windows_key_raw_bytes(
 fn send_windows_raw_events(
     events: Vec<crate::raw_input::RawInputEvent>,
     event_tx: &mpsc::Sender<ClientLoopEvent>,
-    batch_epoch: InputEpoch,
 ) -> bool {
     let raw_event_count = events.len();
     let events = events
@@ -680,7 +586,7 @@ fn send_windows_raw_events(
         "windows raw-framed input events forwarded"
     );
     event_tx
-        .blocking_send(batch_epoch.own(ClientLoopEvent::StdinEvents(events)))
+        .blocking_send(ClientLoopEvent::StdinEvents(events))
         .is_ok()
 }
 
@@ -755,103 +661,11 @@ fn poll_read_ready(fd: i32, timeout_ms: i32) -> Option<bool> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    // The stdin reader thread is hard to unit test since it reads from actual stdin.
+    // Integration tests will verify the full client→server input flow.
+    // Here we test the event type construction.
+
     use super::*;
-
-    #[test]
-    fn credential_pipe_larger_than_read_buffer_retains_owner_until_idle() {
-        use std::io::{BufReader, Read, Write};
-        use std::time::Duration;
-
-        // Match StdinLock's read-ahead capacity, but use an isolated pipe.
-        struct BufferedPipe(BufReader<io::PipeReader>);
-        impl Read for BufferedPipe {
-            fn read(&mut self, data: &mut [u8]) -> io::Result<usize> {
-                self.0.read(data)
-            }
-        }
-        impl AsRawFd for BufferedPipe {
-            fn as_raw_fd(&self) -> std::os::fd::RawFd {
-                self.0.get_ref().as_raw_fd()
-            }
-        }
-        let (read, mut write) = io::pipe().unwrap();
-        let credentials = vec![b's'; 6000];
-        write.write_all(&credentials).unwrap();
-        let quit = Arc::new(AtomicBool::new(false));
-        let epoch = Arc::new(AtomicU64::new(0));
-        let (tx, mut rx) = mpsc::channel(1);
-        let matcher = Arc::new(std::sync::Mutex::new(
-            super::super::direct_graphics::ResponseMatcher::default(),
-        ));
-        let active = matcher.lock().unwrap().active_handle();
-        let thread_quit = quit.clone();
-        let thread_epoch = epoch.clone();
-        let thread = std::thread::spawn(move || {
-            unix_input_reader_loop(
-                &BufferedPipe(BufReader::with_capacity(8192, read)),
-                tx,
-                &thread_quit,
-                (false, false),
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(AtomicBool::new(false)),
-                false,
-                Vec::new(),
-                matcher,
-                active,
-                thread_epoch,
-            );
-        });
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let received = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), async {
-                let mut received = Vec::new();
-                while received.len() < credentials.len() {
-                    let event = rx.recv().await.expect("reader exited early");
-                    // Closing the credential modal must not promote the tail.
-                    epoch.store(1, Ordering::Release);
-                    let ClientLoopEvent::OwnedInput {
-                        epoch: owner,
-                        event,
-                    } = event
-                    else {
-                        panic!("unowned credential input");
-                    };
-                    assert_eq!(owner, 0);
-                    let ClientLoopEvent::StdinInput(data) = *event else {
-                        panic!("expected raw credential input");
-                    };
-                    received.extend(data);
-                }
-                // Once the pipe really drains, a new batch may adopt the
-                // closed modal's epoch. Leave enough time for the idle poll.
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                write.write_all(b"x").unwrap();
-                let ClientLoopEvent::OwnedInput {
-                    epoch: owner,
-                    event,
-                } = rx.recv().await.expect("reader exited before fresh input")
-                else {
-                    panic!("unowned fresh input");
-                };
-                assert_eq!(owner, 1);
-                assert!(matches!(*event, ClientLoopEvent::StdinInput(ref data) if data == b"x"));
-                received
-            })
-            .await
-        });
-        // Keep the writer open during the test: EOF is readable, not idle.
-        quit.store(true, Ordering::Release);
-        drop(rx);
-        drop(write);
-        thread.join().unwrap();
-        assert_eq!(
-            received.expect("credential tail stranded after false idle"),
-            credentials
-        );
-    }
 
     #[cfg(unix)]
     #[test]
@@ -909,173 +723,6 @@ mod tests {
     }
 
     #[test]
-    fn close_after_read_cannot_reassign_bytes_or_delayed_paste_completion() {
-        let epoch = AtomicU64::new(1);
-        let mut owner = InputEpoch(1);
-        let mut framer = unix_input_framer(false, false, false);
-        let (tx, mut rx) = mpsc::channel(64);
-
-        // Readiness -> stamp -> OS read -> deschedule -> modal closes.
-        let read_stamp = owner.after_poll(
-            InputEpoch::capture(&epoch),
-            true,
-            framer.has_pending_input(),
-        );
-        let read_bytes = b"cancel\x1b[200~secret";
-        epoch.fetch_add(1, Ordering::AcqRel);
-        owner = read_stamp;
-        assert!(send_unix_input_chunks(
-            framer.push(read_bytes),
-            &tx,
-            owner,
-            &mut Vec::new(),
-            false,
-            None,
-        ));
-        assert!(framer.has_pending_input());
-
-        // A later read sees the new epoch, but must finish the old paste under
-        // its original owner (including any newer input in this same batch).
-        owner = owner.after_poll(
-            InputEpoch::capture(&epoch),
-            true,
-            framer.has_pending_input(),
-        );
-        assert!(send_unix_input_chunks(
-            framer.push(b"remaining-secret\x1b[201~new input"),
-            &tx,
-            owner,
-            &mut Vec::new(),
-            false,
-            None,
-        ));
-        let mut count = 0;
-        while let Ok(event) = rx.try_recv() {
-            let ClientLoopEvent::OwnedInput { epoch: stamp, .. } = event else {
-                panic!("unowned auth input");
-            };
-            assert_eq!(stamp, 1);
-            assert_ne!(stamp, epoch.load(Ordering::Acquire));
-            count += 1;
-        }
-        assert!(count >= 2);
-        assert!(!framer.has_pending_input());
-        assert_eq!(
-            owner.after_poll(InputEpoch::capture(&epoch), false, false),
-            InputEpoch(2)
-        );
-    }
-
-    #[test]
-    fn epoch_transition_keeps_partial_paste_tail_with_original_owner() {
-        let mut framer = unix_input_framer(false, true, true);
-        let epoch = AtomicU64::new(3);
-        let stamp = InputEpoch::capture(&epoch);
-        assert!(framer.push(b"\x1b[200~secret").is_empty());
-        epoch.fetch_add(1, Ordering::AcqRel);
-        let completion = stamp.after_poll(
-            InputEpoch::capture(&epoch),
-            true,
-            framer.has_pending_input(),
-        );
-        assert_eq!(completion, stamp);
-        let chunks = framer.push(b"remaining-secret\x1b[201~new input");
-        let (tx, mut rx) = mpsc::channel(chunks.len().max(1));
-        assert!(send_unix_input_chunks(
-            chunks,
-            &tx,
-            completion,
-            &mut Vec::new(),
-            false,
-            None
-        ));
-        let mut count = 0;
-        while let Ok(event) = rx.try_recv() {
-            let ClientLoopEvent::OwnedInput { epoch: owner, .. } = event else {
-                panic!("unowned paste tail");
-            };
-            assert_eq!(owner, 3);
-            assert_ne!(owner, epoch.load(Ordering::Acquire));
-            count += 1;
-        }
-        assert!(count > 0);
-        assert!(!framer.has_pending_input());
-        assert_eq!(
-            completion.after_poll(InputEpoch::capture(&epoch), false, false),
-            InputEpoch(4)
-        );
-    }
-
-    #[test]
-    fn queued_chunks_keep_read_epoch_after_cancel_closes_popup() {
-        let epoch = AtomicU64::new(7);
-        let stamp = InputEpoch::capture(&epoch);
-        let (tx, mut rx) = mpsc::channel(8);
-        let mut framer = crate::raw_input::RawInputByteFramer::for_host_input();
-        let mut pending = Vec::new();
-        assert!(send_unix_input_chunks(
-            framer.push(b"\x03"),
-            &tx,
-            stamp,
-            &mut pending,
-            false,
-            None,
-        ));
-        assert!(send_unix_input_chunks(
-            framer.push(b"secret\r"),
-            &tx,
-            stamp,
-            &mut pending,
-            false,
-            None,
-        ));
-        // Both sends predate consumption of Cancel, but are distinct events.
-        epoch.fetch_add(1, Ordering::AcqRel);
-        let mut count = 0;
-        while let Ok(event) = rx.try_recv() {
-            let ClientLoopEvent::OwnedInput { epoch: owner, .. } = event else {
-                panic!("unowned input");
-            };
-            assert_eq!(owner, 7);
-            assert_ne!(owner, epoch.load(Ordering::Acquire));
-            count += 1;
-        }
-        assert!(count >= 2);
-    }
-
-    #[test]
-    fn epoch_transition_during_blocked_batch_send_does_not_restamp_secret() {
-        let epoch = Arc::new(AtomicU64::new(9));
-        let stamp = InputEpoch::capture(&epoch);
-        let (tx, mut rx) = mpsc::channel(1);
-        let producer = std::thread::spawn(move || {
-            assert!(send_unix_input_chunks(
-                vec![b"\x03".to_vec(), b"secret".to_vec(), b"\r".to_vec()],
-                &tx,
-                stamp,
-                &mut Vec::new(),
-                false,
-                None,
-            ));
-        });
-        let first = rx.blocking_recv().unwrap();
-        epoch.fetch_add(1, Ordering::AcqRel);
-        let mut events = vec![first];
-        while let Some(event) = rx.blocking_recv() {
-            events.push(event);
-        }
-        producer.join().unwrap();
-        assert_eq!(events.len(), 3);
-        for event in events {
-            let ClientLoopEvent::OwnedInput { epoch: owner, .. } = event else {
-                panic!("unowned input");
-            };
-            assert_eq!(owner, 9);
-            assert_ne!(owner, epoch.load(Ordering::Acquire));
-        }
-    }
-
-    #[test]
     fn palette_replies_are_forwarded_as_one_input_batch() {
         let (tx, mut rx) = mpsc::channel(4);
         let mut pending = Vec::new();
@@ -1085,18 +732,14 @@ mod tests {
                 b"\x1b]4;1;rgb:4444/5555/6666\x1b\\".to_vec(),
             ],
             &tx,
-            InputEpoch(0),
             &mut pending,
             false,
             None,
         ));
         assert!(rx.try_recv().is_err());
 
-        assert!(flush_unix_palette_input(&tx, InputEpoch(0), &mut pending));
-        let ClientLoopEvent::OwnedInput { event, .. } = rx.try_recv().unwrap() else {
-            panic!("expected owned palette input batch");
-        };
-        let ClientLoopEvent::StdinInput(data) = *event else {
+        assert!(flush_unix_palette_input(&tx, &mut pending));
+        let ClientLoopEvent::StdinInput(data) = rx.try_recv().unwrap() else {
             panic!("expected palette input batch");
         };
         assert_eq!(

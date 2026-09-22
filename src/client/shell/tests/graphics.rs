@@ -449,22 +449,3 @@ fn popup_terminal_keeps_own_graphics_and_hides_only_background_overlap() {
     assert!(is_placed(&frame.graphics, inside));
     assert!(!String::from_utf8_lossy(&frame.graphics).contains("a=t"));
 }
-
-#[test]
-fn ssh_auth_popup_occludes_and_retires_previously_placed_images() {
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(snapshot()));
-    state.set_pane_surface(surface());
-    state.compose(106, 40).unwrap();
-    state.open_auth_popup(ClientEndpointId::Local);
-    let covered = state.auth_popup_rect(106, 40).unwrap();
-    assert_graphics_cover(&mut state, covered, 106, 40);
-    state.close_auth_popup();
-    let frame = state.compose(106, 40).unwrap();
-    let inside = (covered.right() - 1, covered.bottom() - 1);
-    assert!(is_placed(&frame.graphics, inside));
-    state.open_auth_popup(ClientEndpointId::Local);
-    let frame = state.compose(106, 40).unwrap();
-    assert!(!is_placed(&frame.graphics, inside));
-    assert!(String::from_utf8_lossy(&frame.graphics).contains("a=d,d=i"));
-}

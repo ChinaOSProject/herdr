@@ -58,9 +58,7 @@ fn fast_path_blocker(
     state: &ClientShellState,
     patch: &crate::protocol::PaneSurfacePatch,
 ) -> Option<&'static str> {
-    if state.auth_popup_endpoint().is_some() {
-        Some("client_surface_patch.fallback.auth")
-    } else if state.mode != ClientShellMode::Terminal {
+    if state.mode != ClientShellMode::Terminal {
         Some("client_surface_patch.fallback.mode")
     } else if state.overlay.is_some() {
         Some("client_surface_patch.fallback.overlay")

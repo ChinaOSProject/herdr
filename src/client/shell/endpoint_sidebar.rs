@@ -100,9 +100,11 @@ pub(super) fn render_collapsed(
                     rect,
                     rect.y,
                     glyph,
-                    state
-                        .auth
-                        .badge_style(endpoint, palette, Style::default().fg(color)),
+                    state.machine_diagnostics.badge_style(
+                        endpoint,
+                        palette,
+                        Style::default().fg(color),
+                    ),
                 );
             }
             hits.machines.push(MachineHit {
@@ -412,7 +414,7 @@ pub(super) fn render_expanded(
                     marker,
                     endpoint,
                     collapsed && &endpoint.endpoint_id == state.active_endpoint_id,
-                    state.auth,
+                    state.machine_diagnostics,
                     palette,
                 );
                 hits.machines.push(MachineHit {
@@ -591,7 +593,7 @@ fn render_endpoint_row(
     marker: &str,
     endpoint: &ClientShellEndpoint,
     highlighted: bool,
-    auth: &super::auth::AuthPresentation,
+    auth: &super::machine_diagnostics::MachineDiagnostics,
     palette: &Palette,
 ) -> Rect {
     if highlighted {
@@ -605,6 +607,8 @@ fn render_endpoint_row(
     };
     let signal = if auth.required_for(endpoint) {
         "! auth".to_owned()
+    } else if endpoint.status == ClientEndpointStatus::Attention {
+        "! error".to_owned()
     } else if endpoint.endpoint_id.is_local() {
         String::new()
     } else if state.is_empty() {

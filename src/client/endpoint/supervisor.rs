@@ -94,11 +94,6 @@ impl EndpointSupervisors {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn authentication_retry_for_test(&self, id: &ClientEndpointId) -> Option<Instant> {
-        self.endpoints.get(id).and_then(|state| state.next_attempt)
-    }
-
     pub(crate) fn add_local(&mut self, path: PathBuf, generation: Option<u64>, now: Instant) {
         let mut state = ReconnectState::new(ConnectTarget::Local(path), now);
         state.generation = generation;
@@ -137,32 +132,6 @@ impl EndpointSupervisors {
             state.target = ConnectTarget::Ssh(profile.clone());
         }
         retired
-    }
-
-    pub(crate) fn pause_authentication(&mut self, endpoint_id: &ClientEndpointId) -> bool {
-        let Some(state) = self.endpoints.get_mut(endpoint_id) else {
-            return false;
-        };
-        state.generation = None;
-        state.next_attempt = None;
-        state.in_flight = false;
-        state.online_since = None;
-        true
-    }
-
-    pub(crate) fn retry_after_authentication(
-        &mut self,
-        endpoint_id: &ClientEndpointId,
-        now: Instant,
-    ) -> bool {
-        if !self.pause_authentication(endpoint_id) {
-            return false;
-        }
-        if let Some(state) = self.endpoints.get_mut(endpoint_id) {
-            state.next_attempt = Some(now);
-            state.attempts = 0;
-        }
-        true
     }
 
     pub(crate) fn spawn_due(
@@ -241,7 +210,13 @@ impl EndpointSupervisors {
                 state.online_since.get_or_insert(now);
                 state.next_attempt = None;
             }
-            ClientEndpointStatus::Attention | ClientEndpointStatus::Disabled => {
+            ClientEndpointStatus::Attention => {
+                state.online_since = None;
+                // Authentication or configuration may be repaired outside this client.
+                state.next_attempt =
+                    (!endpoint_id.is_local()).then_some(now + Duration::from_secs(30));
+            }
+            ClientEndpointStatus::Disabled => {
                 state.online_since = None;
                 state.next_attempt = None;
             }
@@ -309,11 +284,11 @@ fn connect_once(
             (stream, Box::new(()))
         }
         ConnectTarget::Ssh(profile) => {
-            let connected = crate::remote::connect_saved_ssh(profile.id.as_str(), &profile.target, &profile.session).map_err(|error| {
-                if failure_needs_attention(&error) {
-                    std::io::Error::new(error.kind(), format!("{error}. Run `{}` interactively to approve setup, then restart this client", crate::remote::saved_ssh_bootstrap_command(&profile.target, &profile.session)))
-                } else { error }
-            })?;
+            let connected = crate::remote::connect_saved_ssh(
+                profile.id.as_str(),
+                &profile.target,
+                &profile.session,
+            )?;
             (connected.stream, Box::new(connected.bridge))
         }
     };
@@ -405,28 +380,6 @@ mod tests {
             session: "agents".into(),
             enabled: true,
         }
-    }
-
-    #[test]
-    fn authentication_pauses_only_its_endpoint_and_rejects_late_results() {
-        let now = Instant::now();
-        let profile = profile();
-        let id = ClientEndpointId::Ssh(profile.id.clone());
-        let mut supervisors = EndpointSupervisors::new(&[profile], now);
-        supervisors.add_local(PathBuf::from("local"), Some(1), now);
-        supervisors.endpoints.get_mut(&id).unwrap().generation = Some(7);
-        assert!(supervisors.pause_authentication(&id));
-        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
-        assert!(supervisors.endpoints[&id].next_attempt.is_none());
-        assert_eq!(
-            supervisors.endpoints[&ClientEndpointId::Local].generation,
-            Some(1)
-        );
-        assert!(supervisors.retry_after_authentication(&id, now));
-        assert_eq!(supervisors.endpoints[&id].next_attempt, Some(now));
-        assert!(supervisors.pause_authentication(&id));
-        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Attention, now));
-        assert!(supervisors.endpoints[&id].next_attempt.is_none());
     }
 
     #[test]
@@ -570,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_recovery_rejects_stale_generations_and_stops_retries_for_attention() {
+    fn ssh_recovery_rejects_stale_generations_and_rechecks_attention() {
         let now = Instant::now();
         let mut supervisors = EndpointSupervisors::new(&[profile()], now);
         let endpoint_id = ClientEndpointId::Ssh(profile().id);
@@ -588,6 +541,9 @@ mod tests {
             Some(now + INITIAL_RETRY_DELAY)
         );
         assert!(supervisors.record_status(&endpoint_id, 4, ClientEndpointStatus::Attention, now));
-        assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
+        assert_eq!(
+            supervisors.endpoints[&endpoint_id].next_attempt,
+            Some(now + Duration::from_secs(30))
+        );
     }
 }

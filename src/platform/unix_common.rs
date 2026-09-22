@@ -1,33 +1,5 @@
 use std::path::{Path, PathBuf};
 
-/// Disable terminal echo before authentication input can reach the child.
-pub(crate) fn configure_authentication_pty(
-    master: &dyn portable_pty::MasterPty,
-) -> std::io::Result<()> {
-    use std::io;
-
-    let fd = master.as_raw_fd().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "authentication PTY has no terminal fd",
-        )
-    })?;
-    let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: fd belongs to the live master; tcgetattr initializes settings on
-    // success. The descriptor remains owned by the caller throughout this call.
-    if unsafe { libc::tcgetattr(fd, settings.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the successful tcgetattr above initialized the termios value.
-    let mut settings = unsafe { settings.assume_init() };
-    settings.c_lflag &= !(libc::ECHO | libc::ECHONL);
-    // SAFETY: settings is initialized and fd still refers to the live terminal.
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &settings) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     if status.signal().is_some() {
         super::ChildExitReason::Interrupted

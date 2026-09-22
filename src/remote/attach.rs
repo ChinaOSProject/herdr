@@ -86,6 +86,39 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
 }
 
+pub(crate) fn check_saved_ssh(target: &str, session: &str) -> io::Result<()> {
+    super::validate_remote_target(target)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    crate::session::validate_name(session)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned());
+    ssh.session_name = session.to_owned();
+    let remote = find_installed_remote_herdr(&ssh)?;
+    match remote_server_status(&ssh, &remote, false)? {
+        RemoteServerStatus::Running {
+            endpoint_protocol_generation,
+            surface_interest,
+            health_check,
+            detached_server_daemon,
+            ..
+        } if remote_server_restart_reason(
+            endpoint_protocol_generation,
+            detached_server_daemon,
+            true,
+            surface_interest,
+            health_check,
+        )
+        .is_none() =>
+        {
+            Ok(())
+        }
+        _ => Err(io::Error::other(format!(
+            "remote Herdr server is stopped or incompatible; run `{}`",
+            super::saved_ssh_bootstrap_command(target, session),
+        ))),
+    }
+}
+
 pub(crate) fn prepare_saved_ssh(
     target: &str,
     session_name: &str,

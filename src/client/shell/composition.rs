@@ -55,7 +55,7 @@ impl ClientShellState {
                     == Some(ClientEndpointStatus::Online)
         });
         let mut render_state = render::ShellRenderState {
-            auth: &self.auth,
+            machine_diagnostics: &self.machine_diagnostics,
             endpoints: &self.endpoints,
             active_endpoint_id: &self.active_endpoint_id,
             collapsed_endpoints: &self.collapsed_endpoints,
@@ -135,32 +135,19 @@ impl ClientShellState {
             &self.config.keybinds,
             &self.config.palette,
         );
-        let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
-        if self.auth_popup_endpoint().is_some() {
-            // Even an unavailable projection must retire already-placed host images.
-            frame.graphics = self.graphics.encode(
-                crate::kitty_graphics::surface::Visibility::Hidden,
-                (layout.pane_surface.x, layout.pane_surface.y),
-                None,
-                self.graphics_cell_size,
-                &crate::kitty_graphics::surface::Occlusion::default(),
+        if let Some(notice) = &self.visible_endpoint_notice {
+            self.hits.notification_toast = endpoint_notices::render_notice(
+                &mut buffer,
+                Rect::new(0, 0, cols, rows),
+                notice,
+                1,
+                &self.config.palette,
             );
         }
-        frame
+        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
     }
 
     pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
-        let frame = self.compose_shell(cols, rows);
-        let mut frame = frame.or_else(|| {
-            self.auth_popup_endpoint()
-                .is_some()
-                .then(|| self.compose_unavailable(cols, rows))
-        })?;
-        self.compose_auth(&mut frame, cols, rows);
-        Some(frame)
-    }
-
-    fn compose_shell(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
         self.last_composed_at = Some(std::time::Instant::now());
         self.selection_repaint_deadline = None;
         if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
@@ -220,7 +207,7 @@ impl ClientShellState {
             snapshot,
             &self.config,
             render::ShellRenderState {
-                auth: &self.auth,
+                machine_diagnostics: &self.machine_diagnostics,
                 endpoints: &self.endpoints,
                 active_endpoint_id: &self.active_endpoint_id,
                 collapsed_endpoints: &self.collapsed_endpoints,
@@ -728,9 +715,6 @@ impl ClientShellState {
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
-        }
-        if let Some(outer) = self.auth_popup_rect(cols, rows) {
-            occlusion.cover(outer);
         }
         self.compose_graphics(&mut frame, layout, &occlusion);
         Some(frame)

@@ -38,8 +38,7 @@ impl ClientShellState {
     }
 
     fn link_hover_allowed(&self) -> bool {
-        self.auth_popup_endpoint().is_none()
-            && self.mode == ClientShellMode::Terminal
+        self.mode == ClientShellMode::Terminal
             && self.overlay.is_none()
             && self.popup_terminal_id.is_none()
             && self.outer_focused != Some(false)
