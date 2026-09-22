@@ -26,10 +26,13 @@ mod events;
 mod frame_output;
 mod handshake;
 mod input;
+mod input_epoch;
 mod loop_config;
 mod notifications;
 mod shell;
 mod shell_runtime;
+mod ssh_auth;
+mod ssh_authentication;
 mod startup;
 mod state;
 mod terminal_geometry;
@@ -424,6 +427,8 @@ async fn run_client_loop(
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
+        input_epoch: Arc::new(AtomicU64::new(0)),
+        auth_input_active: false,
     };
     let mut federated = endpoint_catalog.has_enabled_ssh();
     if let Some(shell) = state.shell.as_mut() {
@@ -479,6 +484,7 @@ async fn run_client_loop(
     let will_query_host_cell_size = state.attach_escape.is_none()
         && host_cell_size_query_required(state.kitty_graphics_enabled);
     let stdin_quit = should_quit.clone();
+    let stdin_input_epoch = state.input_epoch.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
     let stdin_sgr_pixels_active = host_sgr_pixels_active.clone();
     let stdin_escape_disambiguation_active = config.host_escape_disambiguation_active;
@@ -504,6 +510,7 @@ async fn run_client_loop(
             stdin_direct_response,
             #[cfg(unix)]
             stdin_direct_response_active,
+            stdin_input_epoch,
         );
     });
 
@@ -594,6 +601,7 @@ async fn run_client_loop(
     let mut next_surface_serial = 1_u64;
     let mut pending_activation: Option<endpoint::PendingEndpointActivation> = None;
     let mut scheduled_activation = None;
+    let mut ssh_authentication = None;
     let mut pending_catalog: Option<Result<Vec<endpoint::SavedSshEndpoint>, String>> = None;
     if state.shell.is_some() && !is_remote_client && state.attach_escape.is_none() {
         catalog_reload::watch_profiles(event_tx.clone(), should_quit.clone());
@@ -608,6 +616,7 @@ async fn run_client_loop(
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
+        state.sync_auth_input_epoch();
         if pending_activation.is_none() {
             if let Some(reload) = pending_catalog.take() {
                 match reload {
@@ -697,6 +706,20 @@ async fn run_client_loop(
                 }
             }
         }
+        let auth_frame = state.shell.as_mut().and_then(|shell| {
+            ssh_authentication::poll(
+                &mut ssh_authentication,
+                &endpoint_catalog.ssh,
+                &mut supervisors,
+                shell,
+                std::time::Instant::now(),
+            )
+            .then(|| shell.compose(state.reported_size.0, state.reported_size.1))
+            .flatten()
+        });
+        if let Some(frame) = auth_frame {
+            state.present_frame(frame);
+        }
         if let Some(shell) = state.shell.as_ref() {
             supervisors.spawn_due(
                 std::time::Instant::now(),
@@ -719,6 +742,11 @@ async fn run_client_loop(
             .map_or(Duration::from_millis(100), |shell| {
                 shell.timer_delay(std::time::Instant::now())
             });
+        let timer_delay = if ssh_authentication.is_some() {
+            timer_delay.min(Duration::from_millis(25))
+        } else {
+            timer_delay
+        };
         let timer_deadline = client_timer.deadline(std::time::Instant::now(), timer_delay);
         let immediate_event = scheduled_activation.take();
         #[cfg(windows)]
@@ -754,8 +782,27 @@ async fn run_client_loop(
             shell.tick_popup_pending(now);
         }
 
+        let Some(event) = state.accept_input_epoch(event) else {
+            continue;
+        };
         match event {
+            ClientLoopEvent::OwnedInput { .. } => continue,
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
+            ClientLoopEvent::SshAuth(command) => {
+                if let Some(shell) = state.shell.as_mut() {
+                    ssh_authentication::command(
+                        command,
+                        &mut ssh_authentication,
+                        &endpoint_catalog.ssh,
+                        &mut supervisors,
+                        shell,
+                    );
+                    if let Some(frame) = shell.compose(state.reported_size.0, state.reported_size.1)
+                    {
+                        state.present_frame(frame);
+                    }
+                }
+            }
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
                 let image_bridge_active = endpoint_accepts_local_images(
@@ -1184,6 +1231,20 @@ async fn run_client_loop(
                     }
                     let unavailable = state.shell.as_mut().and_then(|shell| {
                         shell.set_endpoint_status(&endpoint_id, status);
+                        shell.set_endpoint_auth_required(
+                            &endpoint_id,
+                            status == endpoint::ClientEndpointStatus::Attention
+                                && crate::remote::ssh_error_requires_authentication(&message),
+                        );
+                        if status == endpoint::ClientEndpointStatus::Attention {
+                            ssh_authentication::rejected(
+                                &mut ssh_authentication,
+                                &endpoint_id,
+                                &mut supervisors,
+                                shell,
+                                &message,
+                            );
+                        }
                         (status == endpoint::ClientEndpointStatus::Attention
                             && shell.endpoint_is_active(&endpoint_id))
                         .then(|| format!("{}: {message}", shell.endpoint_label(&endpoint_id)))
@@ -1219,6 +1280,8 @@ async fn run_client_loop(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
                     let frame = state.shell.as_mut().and_then(|shell| {
+                        shell.set_endpoint_auth_required(&endpoint_id, false);
+                        ssh_authentication::verified(&mut ssh_authentication, &endpoint_id, shell);
                         shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
                         shell.set_endpoint_agent_view_projection_supported(
                             &endpoint_id,

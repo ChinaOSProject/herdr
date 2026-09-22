@@ -94,6 +94,11 @@ impl EndpointSupervisors {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn authentication_retry_for_test(&self, id: &ClientEndpointId) -> Option<Instant> {
+        self.endpoints.get(id).and_then(|state| state.next_attempt)
+    }
+
     pub(crate) fn add_local(&mut self, path: PathBuf, generation: Option<u64>, now: Instant) {
         let mut state = ReconnectState::new(ConnectTarget::Local(path), now);
         state.generation = generation;
@@ -132,6 +137,32 @@ impl EndpointSupervisors {
             state.target = ConnectTarget::Ssh(profile.clone());
         }
         retired
+    }
+
+    pub(crate) fn pause_authentication(&mut self, endpoint_id: &ClientEndpointId) -> bool {
+        let Some(state) = self.endpoints.get_mut(endpoint_id) else {
+            return false;
+        };
+        state.generation = None;
+        state.next_attempt = None;
+        state.in_flight = false;
+        state.online_since = None;
+        true
+    }
+
+    pub(crate) fn retry_after_authentication(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        now: Instant,
+    ) -> bool {
+        if !self.pause_authentication(endpoint_id) {
+            return false;
+        }
+        if let Some(state) = self.endpoints.get_mut(endpoint_id) {
+            state.next_attempt = Some(now);
+            state.attempts = 0;
+        }
+        true
     }
 
     pub(crate) fn spawn_due(
@@ -374,6 +405,28 @@ mod tests {
             session: "agents".into(),
             enabled: true,
         }
+    }
+
+    #[test]
+    fn authentication_pauses_only_its_endpoint_and_rejects_late_results() {
+        let now = Instant::now();
+        let profile = profile();
+        let id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut supervisors = EndpointSupervisors::new(&[profile], now);
+        supervisors.add_local(PathBuf::from("local"), Some(1), now);
+        supervisors.endpoints.get_mut(&id).unwrap().generation = Some(7);
+        assert!(supervisors.pause_authentication(&id));
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert!(supervisors.endpoints[&id].next_attempt.is_none());
+        assert_eq!(
+            supervisors.endpoints[&ClientEndpointId::Local].generation,
+            Some(1)
+        );
+        assert!(supervisors.retry_after_authentication(&id, now));
+        assert_eq!(supervisors.endpoints[&id].next_attempt, Some(now));
+        assert!(supervisors.pause_authentication(&id));
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Attention, now));
+        assert!(supervisors.endpoints[&id].next_attempt.is_none());
     }
 
     #[test]

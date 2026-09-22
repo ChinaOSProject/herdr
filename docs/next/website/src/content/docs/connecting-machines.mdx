@@ -9,6 +9,12 @@ Each machine keeps its own Herdr server, sessions, and running processes. A lost
 
 Herdr requests SSH compression to reduce screen-update traffic on limited connections. This works with older compatible Herdr servers and does not change how typing or other input is delivered. Herdr's `-C` option overrides `Compression no` in your SSH config. If SSH reuses an existing connection through an external ControlMaster, that connection keeps its original compression setting.
 
+### Recovering SSH authentication
+
+On Linux and macOS clients, when `remote.manage_ssh_config=true`, Herdr can share an approved OpenSSH connection across machine add, the sidebar, and saved-machine API commands. Click the **`! auth`** badge on the affected machine—not the machine group row—to open a client-private terminal popup. It uses native OpenSSH prompts; Esc or Cancel aborts. Herdr stores no OTP and closes the popup only after the saved endpoint completes a verified handshake. The popup does not install or update Herdr. The non-authentication state is **`! attention`**; in a collapsed sidebar, either state appears as `!`.
+
+The shared connection uses `ControlPersist 600` (10 minutes of idle time); this is not MFA validity. Active connections can remain open, while corporate policy, the SSH server, or the network may end them sooner. Local Windows recovery is not supported yet. For unmanaged SSH connections, authentication remains your responsibility: running `ssh` by itself does not grant Herdr approval unless it uses the shared ControlPath. Host-key checking is unchanged; an unknown or changed host key remains **Attention**.
+
 ## Before you connect
 
 You need normal SSH access to the remote machine. Verify it first:
@@ -76,18 +82,18 @@ Removing or disabling the machine you are viewing returns you to Local. If Local
 ## Connection problems
 
 - **Reconnecting:** Herdr retries automatically after a network interruption, sleep, or SSH failure. Repeated failures increase the delay up to two minutes; brief successful connections do not reset it. A connection must remain healthy for a minute before the next interruption gets a fast retry. SSH connections are checked for application-level activity and probed when quiet, so a broken connection does not stay Online indefinitely. Local detects native connection closure or failure instead of using remote health probes.
-- **Attention:** The target needs an action that cannot be completed in the background, such as host-key approval, authentication, or a compatible server. Other machines remain usable.
+- **Attention:** The target needs an action that cannot be completed in the background, such as host-key approval or a compatible server. Other machines remain usable. **`! auth`** means authentication failed; click that badge to start recovery. **`! attention`** indicates another issue. In a collapsed sidebar, either appears as `!`.
 - **Saved-machine file error:** An unreadable or invalid catalog leaves current connections unchanged. Herdr shows a notice and automatically retries reading it.
 
 When both installations support bridge idle cleanup, saved-machine connections to Linux and macOS also close their remote bridge after a minute without traffic in either direction. Sleep counts toward that deadline, which is checked when the host wakes. Quiet healthy connections exchange health checks; watching continuous output does not require typing. Cleanup leaves the remote Herdr server, sessions, and pane processes running. Older installations remain compatible without this optional cleanup.
 
-Background connections never answer prompts or install, update, restart, or hand off a server. For Attention, run the standalone setup command shown by Herdr in an interactive terminal, for example:
+Background connections never answer prompts or install, update, restart, or hand off a server. For non-authentication Attention, run the standalone setup command shown by Herdr in an interactive terminal, for example:
 
 ```bash
 herdr --remote workbox
 ```
 
-Use your profile's target. If you chose a named session when adding it, include the optional `--session <name>` here too. Follow any approval prompts, then restart the client to retry the Attention connection. Do not stop a running server merely because its version differs from the client.
+Use your profile's target. If you chose a named session when adding it, include the optional `--session <name>` here too. Follow the requested setup prompts, then restart the client to retry the `! attention` connection. The authentication popup does not install or update Herdr. Do not stop a running server merely because its version differs from the client.
 
 If authentication fails, check ordinary SSH first. For a passphrase-protected key, load it with `ssh-add` before starting Herdr's non-interactive background connections.
 

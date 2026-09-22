@@ -241,6 +241,7 @@ pub(super) struct WorkspaceHit {
 
 #[derive(Debug)]
 pub(crate) enum ClientShellAction {
+    SshAuth(SshAuthCommand),
     Endpoint {
         endpoint_id: ClientEndpointId,
         boot_id: String,
@@ -844,6 +845,7 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) auth: super::auth::AuthPresentation,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) active_snapshot_generation: Option<u64>,
@@ -1007,6 +1009,7 @@ impl ClientShellState {
                 .extend(saved.collapsed_groups);
         }
         Self {
+            auth: super::auth::AuthPresentation::default(),
             config,
             snapshot: None,
             active_snapshot_generation: None,

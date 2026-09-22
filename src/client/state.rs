@@ -43,6 +43,8 @@ pub(super) struct ClientState {
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,
+    pub(super) input_epoch: Arc<AtomicU64>,
+    pub(super) auth_input_active: bool,
 }
 
 impl Drop for ClientState {
@@ -94,6 +96,8 @@ impl ClientState {
             deferred_local_activation: None,
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
+            input_epoch: Arc::new(AtomicU64::new(0)),
+            auth_input_active: false,
             shell: Some(shell::ClientShellState::new(
                 shell::ClientShellConfig::from_config(&crate::config::Config::default()),
             )),
@@ -245,7 +249,28 @@ impl ClientState {
         }
     }
 
+    pub(super) fn accept_input_epoch(&self, event: ClientLoopEvent) -> Option<ClientLoopEvent> {
+        match event {
+            ClientLoopEvent::OwnedInput { epoch, event } => {
+                (epoch == self.input_epoch.load(Ordering::Acquire)).then_some(*event)
+            }
+            event => Some(event),
+        }
+    }
+
+    pub(super) fn sync_auth_input_epoch(&mut self) {
+        let active = self
+            .shell
+            .as_ref()
+            .is_some_and(|shell| shell.auth_popup_endpoint().is_some());
+        if active != self.auth_input_active {
+            self.input_epoch.fetch_add(1, Ordering::AcqRel);
+            self.auth_input_active = active;
+        }
+    }
+
     pub(super) fn present_frame(&mut self, frame_data: FrameData) {
+        self.sync_auth_input_epoch();
         if self.presentation_frozen {
             return;
         }

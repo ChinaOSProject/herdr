@@ -127,7 +127,7 @@ impl RawInputFramer {
                     ));
                 }
                 extract_one_event(&chunk).map(|(event, _consumed)| {
-                    tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
+                    tracing::debug!(len = chunk.len(), "raw input event parsed");
                     event
                 })
             })
@@ -297,7 +297,7 @@ impl RawInputByteFramer {
 
         if starts_with_incomplete_sgr_mouse_sequence(&self.buffer) {
             tracing::debug!(
-                bytes = ?self.buffer,
+                len = self.buffer.len(),
                 "discarding incomplete SGR mouse sequence after input timeout"
             );
             let prefix = std::mem::take(&mut self.buffer);
@@ -397,7 +397,7 @@ impl RawInputByteFramer {
             self.host_appearance_reply_awaited = false;
             self.held_pending_host_reply_esc = false;
             tracing::warn!(
-                bytes = ?self.buffer,
+                len = self.buffer.len(),
                 "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
             );
             self.lone_escape_recently_flushed = true;
@@ -413,17 +413,26 @@ impl RawInputByteFramer {
         }
 
         if starts_with_incomplete_utf8_char(&self.buffer) {
-            tracing::trace!(bytes = ?self.buffer, "waiting for UTF-8 continuation bytes");
+            tracing::trace!(
+                len = self.buffer.len(),
+                "waiting for UTF-8 continuation bytes"
+            );
             return chunks;
         }
 
         if self.buffer.first() == Some(&ESC) && starts_with_incomplete_utf8_char(&self.buffer[1..])
         {
-            tracing::trace!(bytes = ?self.buffer, "waiting for escaped UTF-8 continuation bytes");
+            tracing::trace!(
+                len = self.buffer.len(),
+                "waiting for escaped UTF-8 continuation bytes"
+            );
             return chunks;
         }
 
-        tracing::debug!(bytes = ?self.buffer, "dropping incomplete raw input buffer after timeout");
+        tracing::debug!(
+            len = self.buffer.len(),
+            "dropping incomplete raw input buffer after timeout"
+        );
         self.lone_escape_recently_flushed = false;
         self.buffer.clear();
         chunks
@@ -656,7 +665,7 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
             ));
         }
 
-        tracing::debug!(sequence = ?seq, "dropping unsupported escape sequence");
+        tracing::debug!(len = seq.len(), "dropping unsupported escape sequence");
         return Some((RawInputEvent::Unsupported, seq_len));
     }
 

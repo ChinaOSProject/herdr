@@ -47,6 +47,9 @@ pub(super) fn dispatch_client_shell_actions(
                     }
                 }
             }
+            shell::ClientShellAction::SshAuth(command) => {
+                *scheduled_activation = Some(ClientLoopEvent::SshAuth(command));
+            }
             shell::ClientShellAction::ReplayMouse(events) => replay_mouse.extend(events),
             shell::ClientShellAction::Keybind(action) => {
                 debug!(
