@@ -2,7 +2,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 param([string]$Action = "")
 
@@ -26,6 +26,15 @@ if (-not [string]::IsNullOrWhiteSpace($env:CODEX_THREAD_ID) -and $env:CODEX_THRE
 
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+$identityArgs = @()
+try {
+    $pane = (& $herdr pane get $env:HERDR_PANE_ID 2>$null | ConvertFrom-Json).result.pane
+    $process = (& $herdr pane process-info --pane $env:HERDR_PANE_ID 2>$null | ConvertFrom-Json).result.process_info
+    if (-not [string]::IsNullOrWhiteSpace($pane.terminal_id) -and $process.foreground_process_group_id) {
+        $identityArgs = @("--terminal-id", "$($pane.terminal_id)", "--process-group-id", "$($process.foreground_process_group_id)")
+    }
+} catch {
+}
 try {
     $args = @(
         "pane",
@@ -38,8 +47,11 @@ try {
         "--seq",
         "$seq",
         "--agent-session-id",
-        "$sessionId"
+        "$sessionId",
+        "--agent-session-path",
+        "$($payload.transcript_path)"
     )
+    $args += $identityArgs
     if ($payload.hook_event_name -eq "SessionStart" -and $payload.source -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.source)) {
         $args += @("--session-start-source", "$($payload.source)")
     }

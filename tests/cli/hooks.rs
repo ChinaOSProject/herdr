@@ -56,6 +56,16 @@ fn run_shell_hook_with_env(
     hook_input: &str,
     envs: &[(&str, &str)],
 ) -> Option<serde_json::Value> {
+    run_shell_hook_with_probe_response(asset_path, args, hook_input, envs, None)
+}
+
+fn run_shell_hook_with_probe_response(
+    asset_path: &str,
+    args: &[&str],
+    hook_input: &str,
+    envs: &[(&str, &str)],
+    probe_response: Option<&'static [u8]>,
+) -> Option<serde_json::Value> {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("herdr.sock");
@@ -70,10 +80,26 @@ fn run_shell_hook_with_env(
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     reader.read_line(&mut line).unwrap();
-                    let _ = stream.write_all(br#"{"id":"test","result":{"type":"ok"}}"#);
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let response: &[u8] = match (request["method"].as_str(), probe_response) {
+                        (Some("pane.get" | "pane.process_info"), Some(response)) => response,
+                        (Some("pane.get"), None) => {
+                            br#"{"id":"test","result":{"pane":{"terminal_id":"terminal-test"}}}"#
+                        }
+                        (Some("pane.process_info"), None) => {
+                            br#"{"id":"test","result":{"process_info":{"foreground_process_group_id":42}}}"#
+                        }
+                        _ => br#"{"id":"test","result":{"type":"ok"}}"#,
+                    };
+                    let _ = stream.write_all(response);
                     let _ = stream.write_all(b"\n");
                     let _ = stream.flush();
-                    return Some(line);
+                    if !matches!(
+                        request["method"].as_str(),
+                        Some("pane.get" | "pane.process_info")
+                    ) {
+                        return Some(line);
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -186,6 +212,27 @@ fn claude_hook_ignores_cursor_compatibility_payloads() {
 }
 
 #[test]
+fn codex_hook_preserves_resume_identity_when_transcript_admission_probes_fail() {
+    for response in [
+        br#"{"id":"test","error":{"code":"unavailable","message":"probe failed"}}"#.as_slice(),
+        br#"{"id":"test","result":{"pane":{"terminal_id":"terminal-test"},"process_info":{"foreground_process_group_id":null}}}"#.as_slice(),
+    ] {
+        let request = run_shell_hook_with_probe_response(
+            "src/integration/assets/codex/herdr-agent-state.sh",
+            &["session"],
+            r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+            &[],
+            Some(response),
+        )
+        .expect("failed admission probes must preserve the resume identity report");
+        assert_eq!(request["method"], "pane.report_agent_session");
+        assert_eq!(request["params"]["agent_session_id"], "codex-session");
+        assert!(request["params"].get("terminal_id").is_none());
+        assert!(request["params"].get("process_group_id").is_none());
+    }
+}
+
+#[test]
 fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_sessions() {
     let request = run_codex_hook(
         "session",
@@ -195,6 +242,12 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
 
     assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "codex-session");
+    assert_eq!(
+        request["params"]["agent_session_path"],
+        "/tmp/codex-session.jsonl"
+    );
+    assert_eq!(request["params"]["terminal_id"], "terminal-test");
+    assert_eq!(request["params"]["process_group_id"], 42);
     assert!(request["params"].get("state").is_none());
 
     let matching_request = run_shell_hook_with_env(

@@ -17,6 +17,13 @@ use crate::layout::PaneId;
 pub struct TerminalRuntime(crate::pane::PaneRuntime);
 
 impl TerminalRuntime {
+    pub(crate) fn sync_codex_observer(
+        &self,
+        registration: Option<&super::codex::Registration>,
+        events: &mpsc::Sender<AppEvent>,
+    ) {
+        self.0.sync_codex_observer(registration, events);
+    }
     pub fn shutdown(self) {
         self.0.shutdown();
     }

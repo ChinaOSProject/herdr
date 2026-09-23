@@ -64,7 +64,8 @@ Herdr はインテグレーションを 2 つの異なる方法で使います:
 | インテグレーションの種類 | エージェント | 効果 |
 | --- | --- | --- |
 | ライフサイクル権威 | Pi、OMP、Kimi Code CLI、OpenCode、Kilo Code CLI、MastraCode | インストールされ、そのペインについて能動的に報告している間は、フックまたはプラグインのイベントが `idle`、`working`、`blocked` を決定します。同じライフサイクル権威に対して、Herdr はスクリーンマニフェストのフォールバックを併用しません。 |
-| セッション識別 | Claude Code、Codex、GitHub Copilot CLI、Devin CLI、Droid、Qoder CLI、Qwen Code、Letta Code、Cursor Agent CLI、Hermes Agent、Antigravity CLI、Grok CLI | インテグレーションは復元用のネイティブセッション参照を報告します。状態は引き続き Herdr のスクリーンマニフェスト検出から得られます。 |
+| Codex のターン | Codex | インテグレーションはセッション識別を報告し、セッション記録からターンを追跡します。表示中の権限確認は引き続き blocked になります。 |
+| セッション識別 | Claude Code、GitHub Copilot CLI、Devin CLI、Droid、Qoder CLI、Qwen Code、Letta Code、Cursor Agent CLI、Hermes Agent、Antigravity CLI、Grok CLI | インテグレーションは復元用のネイティブセッション参照を報告します。状態は引き続き Herdr のスクリーンマニフェスト検出から得られます。 |
 
 カスタムインテグレーションも、ネイティブのターミナル UI では見えない状態を定義する場合に状態を報告できます。Herdr への組み込みや、認識済みのエージェント実行ファイルは必要ありません。
 
@@ -155,7 +156,7 @@ Codex フックをインストールします:
 herdr integration install codex
 ```
 
-Codex フックは、他のインテグレーションと同じローカルソケット API を通じてセッション識別を報告します。Codex の状態は Herdr のスクリーンマニフェスト検出から得られます。
+Codex フックはセッション識別を報告し、Herdr はセッション記録からターンの開始、完了、中断を追跡します。表示中の権限確認は引き続き blocked になります。Codex インテグレーションのバージョン `9` が必要です。古い場合は上記のインストールコマンドを再実行し、Codex を再起動してください。ターンを追跡できない場合、判定できない画面は idle ではなく unknown と表示されます。
 
 Herdr はデフォルトで `~/.codex` を使い、`CODEX_HOME` が設定されていればそちらを使います。Codex の設定ディレクトリはあらかじめ存在している必要があります。インストールは `herdr-agent-state.sh` を書き込み、`hooks.json` を更新し、`config.toml` に `[features] hooks = true` があることを保証します。非推奨のトップレベル `codex_hooks` フラグが存在すれば削除もします。アンインストールは `hooks.json` から Herdr のエントリを削除してフックスクリプトを削除しますが、`config.toml` は変更しません。
 

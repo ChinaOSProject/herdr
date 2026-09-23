@@ -1286,7 +1286,7 @@ fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
-    const USAGE: &str = "usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE]";
+    const USAGE: &str = "usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [--terminal-id ID] [--process-group-id PID]";
 
     let args = super::expand_equals_args(
         args,
@@ -1297,6 +1297,8 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
             "--agent-session-id",
             "--agent-session-path",
             "--session-start-source",
+            "--terminal-id",
+            "--process-group-id",
         ],
     );
     let mut pane_id = None;
@@ -1306,10 +1308,29 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
     let mut agent_session_id = None;
     let mut agent_session_path = None;
     let mut session_start_source = None;
+    let mut terminal_id = None;
+    let mut process_group_id = None;
 
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            "--terminal-id" | "--process-group-id" => {
+                let option = args[index].as_str();
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for {option}");
+                    return Ok(2);
+                };
+                if option == "--terminal-id" {
+                    terminal_id = Some(value.clone());
+                } else {
+                    process_group_id = Some(
+                        super::parse_u64_flag(option, value)?
+                            .try_into()
+                            .map_err(|_| std::io::Error::other("invalid process group id"))?,
+                    );
+                }
+                index += 2;
+            }
             "--source" => {
                 let Some(value) = args.get(index + 1) else {
                     eprintln!("missing value for --source");
@@ -1392,6 +1413,8 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
     super::send_ok_request(Method::PaneReportAgentSession(
         PaneReportAgentSessionParams {
             pane_id,
+            terminal_id,
+            process_group_id,
             source,
             agent,
             seq,

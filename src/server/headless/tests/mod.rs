@@ -7374,6 +7374,8 @@ fn completion_guard_api_session_replacement_does_not_notify_finished() {
                 &mut server,
                 Method::PaneReportAgentSession(PaneReportAgentSessionParams {
                     pane_id: public_pane_id.clone(),
+                    terminal_id: None,
+                    process_group_id: None,
                     source: "herdr:pi".into(),
                     agent: "pi".into(),
                     seq: Some(11),
@@ -7435,6 +7437,67 @@ fn completion_guard_api_session_replacement_does_not_notify_finished() {
                 "the first real turn after {reason} must finish"
             );
         }
+    }
+}
+
+#[test]
+fn codex_session_report_rejects_stale_terminal_or_process_and_keeps_legacy_identity_only() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("codex-report")];
+    server.app.state.ensure_test_terminals();
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let terminal_id = server.app.state.workspaces[0].panes[&pane_id]
+        .attached_terminal_id
+        .clone();
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    for (expected_terminal, process_group_id, stale) in [
+        (Some("replaced-terminal".to_string()), None, true),
+        (Some(terminal_id.to_string()), Some(1234), true),
+        (None, None, false),
+    ] {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "codex-registration".into(),
+                method: api::schema::Method::PaneReportAgentSession(
+                    api::schema::PaneReportAgentSessionParams {
+                        pane_id: public_pane_id.clone(),
+                        terminal_id: expected_terminal,
+                        process_group_id,
+                        source: "herdr:codex".into(),
+                        agent: "codex".into(),
+                        seq: None,
+                        agent_session_id: Some("session".into()),
+                        agent_session_path: Some(
+                            std::env::temp_dir()
+                                .join("session.jsonl")
+                                .display()
+                                .to_string(),
+                        ),
+                        session_start_source: None,
+                    },
+                ),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
+        if stale {
+            assert_eq!(response["error"]["code"], "agent_session_stale");
+            assert!(server.app.state.terminals[&terminal_id]
+                .persisted_agent_session
+                .is_none());
+        } else {
+            assert!(response.get("result").is_some());
+            assert!(server.app.state.terminals[&terminal_id]
+                .persisted_agent_session
+                .is_some());
+        }
+        assert!(server.app.state.terminals[&terminal_id]
+            .codex_session
+            .is_none());
     }
 }
 

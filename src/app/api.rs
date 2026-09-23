@@ -463,6 +463,13 @@ impl App {
                     runtime.set_full_lifecycle_authority_active(
                         terminal.full_lifecycle_hook_authority_active(),
                     );
+                    runtime.sync_codex_observer(
+                        terminal
+                            .codex_session
+                            .as_ref()
+                            .map(|session| &session.registration),
+                        &self.event_tx,
+                    );
                 }
             }
         }

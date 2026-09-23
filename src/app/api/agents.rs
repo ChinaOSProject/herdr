@@ -322,7 +322,17 @@ impl App {
                 osc_progress: &osc_progress,
             },
         );
-        let value = crate::detect::manifest::explain_to_json_value(&explain);
+        let mut value = crate::detect::manifest::explain_to_json_value(&explain);
+        if agent == crate::detect::Agent::Codex
+            && terminal
+                .codex_session
+                .as_ref()
+                .is_some_and(|session| session.turn.is_some())
+        {
+            value["screen_state"] = value["state"].clone();
+            value["state"] = crate::detect::manifest::agent_state_label(terminal.state).into();
+            value["turn_state_source"] = "session_transcript".into();
+        }
 
         encode_success(id, ResponseResult::AgentExplain { explain: value })
     }

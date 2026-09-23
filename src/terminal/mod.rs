@@ -1,3 +1,4 @@
+pub(crate) mod codex;
 mod history_read;
 mod id;
 mod runtime;

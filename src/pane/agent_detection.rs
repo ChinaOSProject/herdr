@@ -316,6 +316,16 @@ pub(super) fn detection_update_for_publish_with_osc(
     (!detection.skip_state_update).then_some(detection)
 }
 
+pub(super) fn codex_prompt_ready(content: &str) -> bool {
+    // The composer is also visible during a turn. This is only startup
+    // readiness evidence; it must never classify a turn as idle.
+    content
+        .lines()
+        .rev()
+        .take(8)
+        .any(|line| line.trim() == "› Ask Codex to do anything")
+}
+
 pub(super) fn observe_detection_content_change(bytes: &[u8], detection_content_seq: &AtomicU64) {
     if !bytes.is_empty() {
         detection_content_seq.fetch_add(1, Ordering::Relaxed);

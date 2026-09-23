@@ -564,7 +564,7 @@ fn fallback_explain(
 
     DetectionExplain {
         agent: agent.map(|agent| agent_label(agent).to_string()),
-        state: if known_agent {
+        state: if known_agent && agent != Some(Agent::Codex) {
             AgentState::Idle
         } else {
             AgentState::Unknown
@@ -577,7 +577,13 @@ fn fallback_explain(
         visible_working: false,
         skip_state_update: false,
         skipped_update_reason: None,
-        fallback_reason: known_agent.then(|| DEFAULT_KNOWN_AGENT_IDLE_FALLBACK.to_string()),
+        fallback_reason: known_agent.then(|| {
+            if agent == Some(Agent::Codex) {
+                "codex_turn_state_unavailable".to_string()
+            } else {
+                DEFAULT_KNOWN_AGENT_IDLE_FALLBACK.to_string()
+            }
+        }),
         evaluated_rules,
         warning,
         manifest_version,

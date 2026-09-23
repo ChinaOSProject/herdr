@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 set -eu
 
@@ -72,6 +72,7 @@ if agent_session_id:
         "agent": "codex",
         "seq": report_seq,
         "agent_session_id": agent_session_id,
+        "agent_session_path": transcript_path,
     }
     if session_start_source:
         params["session_start_source"] = session_start_source
@@ -83,16 +84,27 @@ if agent_session_id:
 else:
     raise SystemExit(0)
 
-try:
+def send(request):
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(0.5)
     client.connect(socket_path)
     client.sendall((json.dumps(request) + "\n").encode())
     try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
+        return json.loads(client.makefile("r").readline())
+    finally:
+        client.close()
+
+try:
+    pane = send({"id": request_id, "method": "pane.get", "params": {"pane_id": pane_id}})["result"]["pane"]
+    process = send({"id": request_id, "method": "pane.process_info", "params": {"pane_id": pane_id}})["result"]["process_info"]
+    if pane.get("terminal_id") and process.get("foreground_process_group_id"):
+        params["terminal_id"] = pane["terminal_id"]
+        params["process_group_id"] = process["foreground_process_group_id"]
+except Exception:
+    pass
+
+try:
+    send(request)
 except Exception:
     pass
 PY

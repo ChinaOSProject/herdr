@@ -565,6 +565,10 @@ fn restore_tab(
         let handoff_agent_state = imported_runtime
             .as_ref()
             .and_then(|imported| imported.state.agent_state.clone());
+        #[cfg(unix)]
+        let handoff_codex_session = imported_runtime
+            .as_ref()
+            .and_then(|imported| imported.state.codex_session.clone());
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -689,7 +693,11 @@ fn restore_tab(
                 if let Some(agent) = initial_restore_agent {
                     let _ = terminal.set_detected_state_with_screen_signals_at(
                         Some(agent),
-                        AgentState::Idle,
+                        if agent == crate::detect::Agent::Codex {
+                            AgentState::Unknown
+                        } else {
+                            AgentState::Idle
+                        },
                         false,
                         false,
                         false,
@@ -700,6 +708,17 @@ fn restore_tab(
                 #[cfg(unix)]
                 if let Some(agent_state) = handoff_agent_state {
                     terminal.restore_handoff_agent_state(agent_state);
+                }
+                #[cfg(unix)]
+                if let Some(session) = handoff_codex_session {
+                    terminal.restore_codex_session(session);
+                    runtime.sync_codex_observer(
+                        terminal
+                            .codex_session
+                            .as_ref()
+                            .map(|session| &session.registration),
+                        &runtime_context.events,
+                    );
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);

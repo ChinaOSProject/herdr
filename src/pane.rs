@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::path::Path;
 use std::sync::{
@@ -34,7 +34,7 @@ mod terminal;
 mod xtgettcap;
 
 use self::agent_detection::{
-    decide_detection_screen_read, decide_screen_detection_publish,
+    codex_prompt_ready, decide_detection_screen_read, decide_screen_detection_publish,
     detection_update_for_publish_with_osc, mark_detection_content_changed,
     observe_detection_content_change, DetectionPublishDecision, DetectionScreenReadDecision,
     DetectionScreenReadInput, PendingIdleConfirmation, ScreenDetectionPublishInput,
@@ -771,6 +771,7 @@ fn spawn_basic_detection_task(
         let mut last_screen_scan_detection_content_seq = None;
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
+        let mut codex_prompt_reported = false;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -788,6 +789,7 @@ fn spawn_basic_detection_task(
                     last_visible_working = false;
                     last_visible_signal_refresh = None;
                     last_process_check = std::time::Instant::now();
+                    codex_prompt_reported = false;
                     last_foreground_pgid = None;
                     has_process_probe = false;
                     acquisition_started_at = None;
@@ -887,6 +889,7 @@ fn spawn_basic_detection_task(
                         || foreground_action
                             == ForegroundShellAgentAction::ReportReplacementProcess;
                     if agent_changed {
+                        codex_prompt_reported = false;
                         pending_idle.clear();
                         last_screen_scan_detection_content_seq = None;
                         // A replacement agent must not inherit OSC evidence
@@ -987,6 +990,20 @@ fn spawn_basic_detection_task(
                 pending_idle.clear();
                 continue;
             };
+            if !codex_prompt_reported
+                && agent == Some(Agent::Codex)
+                && !process_exited
+                && screen_detection.state == AgentState::Unknown
+                && codex_prompt_ready(&content)
+            {
+                codex_prompt_reported = true;
+                let _ = state_events
+                    .send(AppEvent::CodexPromptReady {
+                        pane_id,
+                        observed_at: now,
+                    })
+                    .await;
+            }
             match decide_screen_detection_publish(
                 ScreenDetectionPublishInput {
                     screen_detection,
@@ -1297,6 +1314,7 @@ pub struct PaneRuntime {
     // Task handles for deterministic shutdown
     compression: TerminalCompressionTask,
     detect_handle: Option<tokio::task::AbortHandle>,
+    codex_observer: RefCell<Option<crate::terminal::codex::Observer>>,
 }
 
 enum PaneRuntimeIo {
@@ -1479,6 +1497,7 @@ pub enum WheelRouting {
 
 impl Drop for PaneRuntime {
     fn drop(&mut self) {
+        self.codex_observer.get_mut().take();
         // Abort detection task immediately and terminate the owned session.
         // The PTY actor shuts down before the process/session policy runs.
         if let Some(handle) = &self.detect_handle {
@@ -2089,6 +2108,7 @@ impl PaneRuntime {
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
             agent_state: None,
+            codex_session: None,
         }
     }
 
@@ -2300,6 +2320,7 @@ impl PaneRuntime {
             terminal_title,
             initial_history_ansi,
             agent_state: _,
+            codex_session: _,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -2453,6 +2474,7 @@ impl PaneRuntime {
             preserve_processes_on_drop: true,
             compression,
             detect_handle: Some(detect_handle),
+            codex_observer: RefCell::new(None),
         })
     }
 
@@ -2660,6 +2682,7 @@ impl PaneRuntime {
                 let mut last_screen_scan_detection_content_seq = None;
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
+                let mut codex_prompt_reported = false;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2691,6 +2714,7 @@ impl PaneRuntime {
                             foreground_shell_exit_reported = false;
                             release_was_active = false;
                             pending_restore_probe = false;
+                            codex_prompt_reported = false;
                             last_visible_blocker = false;
                             last_visible_working = false;
                             last_visible_signal_refresh = None;
@@ -2836,6 +2860,7 @@ impl PaneRuntime {
                                         agent_startup_grace_until =
                                             Some(now + AGENT_STARTUP_GRACE_WINDOW);
                                         state = AgentState::Unknown;
+                                        codex_prompt_reported = false;
                                         last_visible_idle = false;
                                         last_visible_blocker = false;
                                         last_visible_working = false;
@@ -2956,6 +2981,20 @@ impl PaneRuntime {
                         pending_idle.clear();
                         continue;
                     };
+                    if !codex_prompt_reported
+                        && agent == Some(Agent::Codex)
+                        && !process_exited
+                        && screen_detection.state == AgentState::Unknown
+                        && codex_prompt_ready(&content)
+                    {
+                        codex_prompt_reported = true;
+                        let _ = state_events
+                            .send(AppEvent::CodexPromptReady {
+                                pane_id,
+                                observed_at: now,
+                            })
+                            .await;
+                    }
                     match decide_screen_detection_publish(
                         ScreenDetectionPublishInput {
                             screen_detection,
@@ -3031,6 +3070,7 @@ impl PaneRuntime {
             preserve_processes_on_drop: false,
             compression,
             detect_handle,
+            codex_observer: RefCell::new(None),
         })
     }
 
@@ -3042,6 +3082,20 @@ impl PaneRuntime {
             });
         }
         self.detect_reset_notify.notify_one();
+    }
+
+    pub(crate) fn sync_codex_observer(
+        &self,
+        registration: Option<&crate::terminal::codex::Registration>,
+        events: &mpsc::Sender<AppEvent>,
+    ) {
+        let mut observer = self.codex_observer.borrow_mut();
+        if observer.as_ref().map(|observer| &observer.registration) == registration {
+            return;
+        }
+        *observer = registration.map(|registration| {
+            crate::terminal::codex::Observer::start(registration.clone(), events.clone())
+        });
     }
 
     pub fn reset_agent_detection(&self) {
@@ -3738,6 +3792,7 @@ impl PaneRuntime {
                 preserve_processes_on_drop: true,
                 compression,
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
+                codex_observer: RefCell::new(None),
             },
             rx,
         )
@@ -4906,6 +4961,7 @@ mod tests {
             preserve_processes_on_drop: true,
             compression,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
+            codex_observer: RefCell::new(None),
         };
 
         assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
@@ -4945,6 +5001,7 @@ mod tests {
             preserve_processes_on_drop: true,
             compression,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
+            codex_observer: RefCell::new(None),
         };
 
         assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));

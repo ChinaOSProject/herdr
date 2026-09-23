@@ -13,6 +13,8 @@ use crate::terminal::TerminalId;
 #[path = "metadata.rs"]
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
+#[path = "codex_state.rs"]
+mod codex_state;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HookAuthority {
@@ -132,7 +134,12 @@ pub struct TerminalState {
     pub detected_agent: Option<Agent>,
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
+    fallback_visible_working: bool,
     fallback_observed_at: Option<Instant>,
+    pub(crate) codex_session: Option<super::codex::Session>,
+    codex_generation: u64,
+    codex_prompt_ready: bool,
+    codex_prompt_started_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
@@ -169,7 +176,12 @@ impl TerminalState {
             detected_agent: None,
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
+            fallback_visible_working: false,
             fallback_observed_at: None,
+            codex_session: None,
+            codex_generation: 0,
+            codex_prompt_ready: false,
+            codex_prompt_started_at: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
@@ -249,7 +261,17 @@ impl TerminalState {
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {
         let reached_idle = self.agent_process_acquisition_pending && self.state == AgentState::Idle;
-        let suppress_completion = reached_idle && self.recent_agent_process_exit.is_none();
+        let suppress_completion = (reached_idle
+            || (self.state == AgentState::Idle
+                && !self
+                    .hook_authority
+                    .as_ref()
+                    .is_some_and(|authority| self.hook_authority_is_effective(authority))
+                && self
+                    .codex_session
+                    .as_ref()
+                    .is_some_and(|session| session.replayed_idle)))
+            && self.recent_agent_process_exit.is_none();
         if reached_idle {
             self.agent_process_acquisition_pending = false;
         }
@@ -355,10 +377,20 @@ impl TerminalState {
         fallback_state: AgentState,
         visible_blocker: bool,
         _visible_idle: bool,
-        _visible_working: bool,
+        visible_working: bool,
         process_exited: bool,
         now: Instant,
     ) -> TerminalStateMutation {
+        if (process_exited || agent.is_some_and(|agent| agent != Agent::Codex))
+            && self
+                .codex_session
+                .as_ref()
+                .is_some_and(|session| session.registered_at > now)
+        {
+            // A guarded SessionStart can acquire a replacement before an old
+            // detector event leaves the queue.
+            return TerminalStateMutation::default();
+        }
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
@@ -419,6 +451,10 @@ impl TerminalState {
             };
         }
         self.detected_agent = agent;
+        if process_exited || agent.is_some_and(|agent| agent != Agent::Codex) {
+            self.codex_session = None;
+            self.codex_prompt_ready = false;
+        }
         if let Some(agent) = agent {
             let agent_label = crate::detect::agent_label(agent);
             self.reconcile_agent_name_owner(agent_label, None);
@@ -435,6 +471,7 @@ impl TerminalState {
         }
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
+        self.fallback_visible_working = visible_working && fallback_state == AgentState::Working;
         self.fallback_observed_at = Some(now);
         if process_exited {
             if let Some(agent) = agent {
@@ -1972,6 +2009,8 @@ impl TerminalState {
         settle_delay: Duration,
         timeout: Duration,
     ) {
+        self.codex_prompt_ready = false;
+        self.codex_prompt_started_at = Some(now);
         self.set_agent_name(name);
         self.agent_process_acquisition_pending = true;
         self.agent_name_owner = Some(AgentNameOwner {
@@ -2039,7 +2078,7 @@ impl TerminalState {
             return true;
         }
         if managed.phase == ManagedAgentPhase::Blocked {
-            if known_agent == Some(managed.kind) && self.state == AgentState::Idle {
+            if known_agent == Some(managed.kind) && self.managed_agent_prompt_ready(managed.kind) {
                 self.managed_agent = Some(ManagedAgent {
                     kind: managed.kind,
                     phase: ManagedAgentPhase::Active,
@@ -2067,7 +2106,9 @@ impl TerminalState {
                 return true;
             }
             if ready_after.is_none_or(|ready_after| now >= ready_after) {
-                if known_agent == Some(managed.kind) && self.state == AgentState::Idle {
+                if known_agent == Some(managed.kind)
+                    && self.managed_agent_prompt_ready(managed.kind)
+                {
                     self.managed_agent = Some(ManagedAgent {
                         kind: managed.kind,
                         phase: ManagedAgentPhase::Active,
@@ -2132,7 +2173,10 @@ impl TerminalState {
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
+        self.fallback_visible_working = false;
         self.fallback_observed_at = None;
+        self.codex_session = None;
+        self.codex_prompt_ready = false;
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
@@ -2213,6 +2257,9 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
+        if !self.codex_session_matches_current() {
+            self.codex_session = None;
+        }
         let state = if self.visible_blocker_overrides_hook() {
             AgentState::Blocked
         } else {
@@ -2220,7 +2267,7 @@ impl TerminalState {
                 .as_ref()
                 .filter(|authority| self.hook_authority_is_effective(authority))
                 .map(|authority| authority.state)
-                .unwrap_or(self.fallback_state)
+                .unwrap_or_else(|| self.codex_state().unwrap_or(self.fallback_state))
         };
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();

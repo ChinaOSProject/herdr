@@ -62,7 +62,8 @@ Herdr uses integrations in two ways:
 | Integration type | Agents | Effect |
 | --- | --- | --- |
 | Lifecycle authority | Pi, OMP, Kimi Code CLI, OpenCode, Kilo Code CLI, MastraCode | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |
-| Session identity | Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Qoder CLI, Qwen Code, Letta Code, Cursor Agent CLI, Hermes Agent, Antigravity CLI, Grok CLI | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |
+| Codex turns | Codex | The integration reports session identity and enables turn tracking from the session transcript. Visible permission prompts still show as blocked. |
+| Session identity | Claude Code, GitHub Copilot CLI, Devin CLI, Droid, Qoder CLI, Qwen Code, Letta Code, Cursor Agent CLI, Hermes Agent, Antigravity CLI, Grok CLI | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |
 
 Custom integrations can also report state that is not visible in the native terminal UI. They do not need to be built into Herdr or use a recognized agent executable.
 
@@ -153,7 +154,7 @@ Install the Codex hook:
 herdr integration install codex
 ```
 
-The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.
+The Codex hook reports session identity and lets Herdr track turn starts, completion, and interruption from the session transcript. Visible permission prompts still show as blocked. This requires Codex integration version `9`; rerun the install command above to update an older integration, then restart Codex. Without turn tracking, ambiguous Codex screens show as unknown rather than idle.
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
 

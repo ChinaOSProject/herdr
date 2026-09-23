@@ -117,6 +117,14 @@ pub enum AppEvent {
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         session_start_source: Option<String>,
+        transcript_path: Option<std::path::PathBuf>,
+    },
+    /// A validated terminal-owned Codex transcript advanced or became unavailable.
+    CodexTurnObserved(crate::terminal::codex::Observation),
+    /// Codex displayed its input composer during managed startup.
+    CodexPromptReady {
+        pane_id: PaneId,
+        observed_at: Instant,
     },
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {
