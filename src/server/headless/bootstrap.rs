@@ -35,21 +35,7 @@ pub fn run_server() -> io::Result<()> {
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
-
-    // Start the JSON API socket server.
-    let _api_server = match api::start_server_with_stop_control(
-        api_tx.clone(),
-        event_hub.clone(),
-        server_stop.clone(),
-    ) {
-        Ok(server) => server,
-        Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
-            eprintln!("error: herdr server is already running");
-            eprintln!("api socket: {}", api::socket_path().display());
-            std::process::exit(1);
-        }
-        Err(err) => return Err(err),
-    };
+    let server_events = mpsc::channel(64);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -57,6 +43,23 @@ pub fn run_server() -> io::Result<()> {
         .map_err(io::Error::other)?;
 
     let result = rt.block_on(async {
+        // The API can answer before App restoration finishes. Install stop
+        // handlers first so signals received during restoration are retained.
+        monitor_server_signals(&server_stop, &server_events.0);
+        let api_server = match api::start_server_with_stop_control(
+            api_tx.clone(),
+            event_hub.clone(),
+            server_stop.clone(),
+        ) {
+            Ok(server) => server,
+            Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+                eprintln!("error: herdr server is already running");
+                eprintln!("api socket: {}", api::socket_path().display());
+                std::process::exit(1);
+            }
+            Err(err) => return Err(err),
+        };
+
         // Create the App (with AppState, event channels, etc.).
         let mut app = app::App::try_new(
             &loaded_config.config,
@@ -72,8 +75,9 @@ pub fn run_server() -> io::Result<()> {
             app,
             &loaded_config.diagnostics,
             Some(api_tx.clone()),
-            Some(_api_server),
+            Some(api_server),
             server_stop,
+            server_events,
         ) {
             Ok(server) => server,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -98,6 +102,15 @@ pub fn run_server() -> io::Result<()> {
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
+}
+
+fn monitor_server_signals(server_stop: &ServerStop, server_events: &mpsc::Sender<ServerEvent>) {
+    let server_stop = server_stop.clone();
+    let quit_notify = server_events.clone();
+    crate::platform::spawn_server_signal_monitor(move |signal| {
+        server_stop.request(ShutdownReason::Signal(signal));
+        let _ = quit_notify.try_send(ServerEvent::QuitSignal);
+    });
 }
 
 fn seed_startup_workspace_if_empty(app: &mut app::App) {
@@ -139,6 +152,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
+    let server_events = mpsc::channel(64);
 
     let mut imports = HashMap::new();
     for (pane, fd) in received.manifest.panes.into_iter().zip(received.fds) {
@@ -158,6 +172,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         .map_err(io::Error::other)?;
 
     let result = rt.block_on(async {
+        monitor_server_signals(&server_stop, &server_events.0);
         let app = app::App::new_from_handoff(
             &loaded_config.config,
             config::config_diagnostic_summary(&loaded_config.diagnostics),
@@ -185,6 +200,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             Some(api_tx.clone()),
             Some(api_server),
             server_stop,
+            server_events,
         )?;
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.

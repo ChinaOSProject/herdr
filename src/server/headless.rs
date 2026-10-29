@@ -323,6 +323,7 @@ impl HeadlessServer {
         api_tx: Option<api::ApiRequestSender>,
         api_server: Option<api::ServerHandle>,
         server_stop: ServerStop,
+        server_events: (mpsc::Sender<ServerEvent>, mpsc::Receiver<ServerEvent>),
     ) -> io::Result<Self> {
         let should_quit = server_stop.flag().clone();
         let client_path = client_socket_path();
@@ -337,8 +338,8 @@ impl HeadlessServer {
         #[cfg(unix)]
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
-        // Channel for server events from client threads.
-        let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        // Stop signals may already be queued while App restoration completes.
+        let (server_event_tx, server_event_rx) = server_events;
         #[cfg(windows)]
         spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone())?;
 
@@ -412,12 +413,6 @@ impl HeadlessServer {
     pub async fn run(&mut self) -> io::Result<()> {
         crate::logging::startup("server");
 
-        let server_stop = self.server_stop.clone();
-        let quit_notify = self.server_event_tx.clone();
-        crate::platform::spawn_server_signal_monitor(move |signal| {
-            server_stop.request(ShutdownReason::Signal(signal));
-            let _ = quit_notify.try_send(ServerEvent::QuitSignal);
-        });
         let quit_notify = self.server_event_tx.clone();
         let _host_shutdown = crate::platform::HostShutdownMonitor::start(
             self.host_shutdown_requested.clone(),
