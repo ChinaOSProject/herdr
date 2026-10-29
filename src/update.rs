@@ -2489,6 +2489,8 @@ fn platform_target() -> (&'static str, &'static str) {
         "x86_64"
     } else if cfg!(target_arch = "aarch64") {
         "aarch64"
+    } else if cfg!(target_arch = "loongarch64") {
+        "loongarch64"
     } else {
         "unknown"
     };
@@ -3613,7 +3615,10 @@ mod tests {
     fn platform_target_is_known() {
         let (os, arch) = platform_target();
         assert!(os == "linux" || os == "macos", "os: {os}");
-        assert!(arch == "x86_64" || arch == "aarch64", "arch: {arch}");
+        assert!(
+            arch == "x86_64" || arch == "aarch64" || arch == "loongarch64",
+            "arch: {arch}"
+        );
     }
 
     #[test]

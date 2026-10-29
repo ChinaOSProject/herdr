@@ -296,6 +296,7 @@ impl RemotePlatform {
         let arch = match arch.trim() {
             "x86_64" | "amd64" => "x86_64",
             "aarch64" | "arm64" => "aarch64",
+            "loongarch64" if os == "linux" => "loongarch64",
             _ => return None,
         };
         Some(Self { os, arch })
@@ -316,6 +317,8 @@ impl RemotePlatform {
             "x86_64"
         } else if cfg!(target_arch = "aarch64") {
             "aarch64"
+        } else if cfg!(target_arch = "loongarch64") {
+            "loongarch64"
         } else {
             "unknown"
         };
@@ -1872,6 +1875,8 @@ fn install_source_description_for(
 
     if local_binary_can_seed_remote {
         "the current local herdr binary".to_string()
+    } else if platform.arch == "loongarch64" {
+        format!("a compatible LoongArch binary supplied with {REMOTE_BINARY_ENV_VAR}")
     } else {
         format!(
             "the {} {} asset for {}",
@@ -2444,6 +2449,14 @@ fn remote_shell_resolves_managed_install(stdout: &str) -> bool {
 }
 
 fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource> {
+    if platform.arch == "loongarch64" {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "no official linux-loongarch64 release asset; set {REMOTE_BINARY_ENV_VAR} to a compatible LoongArch binary or install Herdr on the remote manually"
+            ),
+        ));
+    }
     let asset_key = platform.asset_key();
     let asset = remote_release_asset(&asset_key)?;
 
@@ -4494,6 +4507,36 @@ mod tests {
     }
 
     #[test]
+    fn remote_platform_recognizes_linux_loongarch64_without_architecture_aliasing() {
+        let platform = RemotePlatform::from_uname("Linux\n", "loongarch64\n")
+            .expect("Linux LoongArch discovery");
+        assert_eq!(platform.asset_key(), "linux-loongarch64");
+        assert!(RemotePlatform::from_uname("Darwin", "loongarch64").is_none());
+        if cfg!(all(target_os = "linux", target_arch = "loongarch64")) {
+            assert_eq!(platform, RemotePlatform::local());
+        }
+    }
+
+    #[test]
+    fn loongarch64_remote_setup_requires_a_local_binary_instead_of_a_release_download() {
+        let platform = RemotePlatform::from_uname("Linux", "loongarch64").unwrap();
+        let source =
+            resolve_install_source(&platform, Some(PathBuf::from("/tmp/herdr-loongarch64")))
+                .expect("explicit compatible binary");
+        assert_eq!(source.path, PathBuf::from("/tmp/herdr-loongarch64"));
+        assert!(source.temporary_dir.is_none());
+        assert_eq!(
+            install_source_description_for(&platform, None, false),
+            "a compatible LoongArch binary supplied with HERDR_REMOTE_BINARY"
+        );
+        let error = download_release_asset(&platform)
+            .err()
+            .expect("no official asset");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("HERDR_REMOTE_BINARY"));
+    }
+
+    #[test]
     fn windows_platform_probe_preserves_native_and_unsupported_architectures() {
         for arch in ["AMD64", "x86_64"] {
             assert_eq!(
@@ -5580,7 +5623,10 @@ function Get-Process {
 
     #[test]
     fn install_source_description_uses_release_asset_when_local_binary_cannot_seed_remote() {
-        let platform = RemotePlatform::local();
+        let platform = RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        };
 
         assert_eq!(
             install_source_description_for(&platform, None, false),
