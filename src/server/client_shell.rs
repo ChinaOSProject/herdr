@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
+#[cfg(test)]
 pub(super) fn snapshot(
     app: &app::App,
     boot_id: &str,
@@ -10,7 +11,29 @@ pub(super) fn snapshot(
     config_diagnostic: Option<&str>,
     location: Option<&crate::server::clients::ClientShellLocation>,
 ) -> protocol::ClientShellSnapshot {
-    let snapshot = app.session_snapshot();
+    snapshot_with_completions(app, boot_id, revision, config_diagnostic, location).0
+}
+
+pub(super) fn snapshot_with_completions(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+    config_diagnostic: Option<&str>,
+    location: Option<&crate::server::clients::ClientShellLocation>,
+) -> (
+    protocol::ClientShellSnapshot,
+    protocol::endpoint::EndpointAgentCompletions,
+) {
+    let snapshot = app.session_metadata_snapshot();
+    let completions = protocol::endpoint::EndpointAgentCompletions {
+        boot_id: boot_id.to_owned(),
+        revision,
+        completions: snapshot
+            .agents
+            .iter()
+            .filter_map(|agent| agent.completion_seq.map(|seq| (agent.pane_id.clone(), seq)))
+            .collect(),
+    };
     let focused_workspace_id = location
         .and_then(|location| location.focused_workspace_id.clone())
         .or_else(|| snapshot.focused_workspace_id.clone());
@@ -216,7 +239,7 @@ pub(super) fn snapshot(
                 preview: notes.preview,
             });
 
-    protocol::ClientShellSnapshot {
+    let shell = protocol::ClientShellSnapshot {
         boot_id: boot_id.to_owned(),
         revision,
         config_diagnostic: config_diagnostic.map(str::to_owned),
@@ -240,7 +263,8 @@ pub(super) fn snapshot(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
-    }
+    };
+    (shell, completions)
 }
 
 pub(super) struct RenderedPaneSurface {
@@ -250,6 +274,13 @@ pub(super) struct RenderedPaneSurface {
     pub(super) popup: Option<Box<protocol::ClientShellPopupSurface>>,
     pub(super) graphics: protocol::SurfaceGraphicsScene,
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
+    pub(super) graphics_sources: crate::kitty_graphics::surface::SourceFiles,
+}
+
+#[derive(Debug)]
+pub(super) enum SurfaceRenderDeferred {
+    Synchronized,
+    Changed,
 }
 
 pub(super) fn render_pane_surface(
@@ -261,36 +292,54 @@ pub(super) fn render_pane_surface(
     cell_size: crate::kitty_graphics::HostCellSize,
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
-) -> RenderedPaneSurface {
-    let content_revisions_before = target
-        .and_then(|target| {
-            let workspace = app.state.workspaces.get(target.workspace_index)?;
-            let tab = workspace.tabs.get(target.tab_index)?;
-            Some(
-                tab.layout
-                    .pane_ids()
-                    .into_iter()
-                    .filter_map(|pane_id| {
-                        app.state
-                            .runtime_for_pane_in_workspace(
-                                &app.terminal_runtimes,
-                                target.workspace_index,
-                                pane_id,
-                            )
-                            .map(|runtime| (pane_id, runtime.content_seq()))
-                    })
-                    .collect::<std::collections::HashMap<_, _>>(),
-            )
-        })
-        .unwrap_or_default();
+) -> Result<RenderedPaneSurface, SurfaceRenderDeferred> {
+    let layout = crate::ui::compute_tab_surface_for(
+        &app.state,
+        &app.terminal_runtimes,
+        target,
+        area,
+        resize_panes,
+        cell_size,
+    );
+    let mut content_revisions_before = std::collections::HashMap::new();
+    if let Some(target) = target {
+        for pane in &layout.pane_infos {
+            if let Some(runtime) = app.state.runtime_for_pane_in_workspace(
+                &app.terminal_runtimes,
+                target.workspace_index,
+                pane.id,
+            ) {
+                let (synchronized, epoch) = runtime.synchronized_output_state();
+                if synchronized {
+                    return Err(SurfaceRenderDeferred::Synchronized);
+                }
+                let revision = runtime.content_seq();
+                content_revisions_before.insert(pane.id, (epoch, revision));
+            }
+        }
+    }
+    let popup_revision_before = if show_popup {
+        app.state
+            .popup_pane
+            .as_ref()
+            .and_then(|popup| app.terminal_runtimes.get(&popup.terminal_id))
+            .map(|runtime| {
+                let (synchronized, epoch) = runtime.synchronized_output_state();
+                if synchronized {
+                    return Err(SurfaceRenderDeferred::Synchronized);
+                }
+                Ok(epoch)
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let (buffer, cursor, hyperlinks, layout) =
         crate::server::render_stream::render_tab_surface_virtual(
             &app.state,
             &app.terminal_runtimes,
-            target,
+            layout,
             area,
-            resize_panes,
-            cell_size,
         );
     let panes = target
         .map(|target| {
@@ -319,7 +368,9 @@ pub(super) fn render_pane_surface(
                         };
                         let content_revision = runtime.map_or(0, |runtime| {
                             let after = runtime.content_seq();
-                            if content_revisions_before.get(&pane.id).copied() == Some(after)
+                            if content_revisions_before
+                                .get(&pane.id)
+                                .is_some_and(|&(_, before)| before == after)
                                 && after.is_multiple_of(2)
                             {
                                 after
@@ -388,24 +439,59 @@ pub(super) fn render_pane_surface(
     let popup = show_popup
         .then(|| render_popup_surface(app, area, resize_panes, cell_size))
         .flatten();
-    let (graphics, next_graphics_delivery) = crate::server::client_shell_graphics::collect(
-        app,
-        &layout.pane_infos,
-        &layout.split_borders,
-        popup.as_deref(),
-        target,
-        cell_size,
-        graphics_delivery,
-        client_id,
-    );
-    RenderedPaneSurface {
+    let (graphics, next_graphics_delivery, graphics_sources) =
+        crate::server::client_shell_graphics::collect(
+            app,
+            &layout.pane_infos,
+            &layout.split_borders,
+            popup.as_deref(),
+            target,
+            cell_size,
+            graphics_delivery,
+            client_id,
+        );
+    if let Some(target) = target {
+        for (&pane_id, &(epoch, _)) in &content_revisions_before {
+            if let Some(runtime) = app.state.runtime_for_pane_in_workspace(
+                &app.terminal_runtimes,
+                target.workspace_index,
+                pane_id,
+            ) {
+                let (synchronized, after_epoch) = runtime.synchronized_output_state();
+                if synchronized {
+                    return Err(SurfaceRenderDeferred::Synchronized);
+                }
+                if after_epoch != epoch {
+                    return Err(SurfaceRenderDeferred::Changed);
+                }
+            }
+        }
+    }
+    if let Some(before) = popup_revision_before {
+        if let Some(runtime) = app
+            .state
+            .popup_pane
+            .as_ref()
+            .and_then(|popup| app.terminal_runtimes.get(&popup.terminal_id))
+        {
+            let (synchronized, after_epoch) = runtime.synchronized_output_state();
+            if synchronized {
+                return Err(SurfaceRenderDeferred::Synchronized);
+            }
+            if after_epoch != before {
+                return Err(SurfaceRenderDeferred::Changed);
+            }
+        }
+    }
+    Ok(RenderedPaneSurface {
         frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
         panes,
         splits,
         popup,
         graphics,
         graphics_delivery: next_graphics_delivery,
-    }
+        graphics_sources,
+    })
 }
 
 fn render_popup_surface(
@@ -542,6 +628,94 @@ fn split_hit_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_metadata_skips_scroll_reads_and_preserves_public_session_data() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("active");
+        workspace.test_add_tab(None);
+        app.state.workspaces = vec![workspace, crate::workspace::Workspace::test_new("hidden")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let history = (0..40)
+            .map(|line| format!("line-{line}\r\n"))
+            .collect::<String>();
+        for (index, terminal) in app.state.terminals.values_mut().enumerate() {
+            if index < 2 {
+                terminal.set_detected_state(
+                    Some(crate::detect::Agent::Pi),
+                    crate::detect::AgentState::Working,
+                );
+                terminal.agent_name = Some(format!("agent-{index}"));
+                terminal.last_agent_state_change_seq = Some(5);
+                terminal.last_agent_completion_seq = Some(7);
+            }
+            let runtime = crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                5,
+                1000,
+                history.as_bytes(),
+            );
+            runtime.scroll_up(3);
+            app.terminal_runtimes.insert(terminal.id.clone(), runtime);
+        }
+
+        let metadata = app.session_metadata_snapshot();
+        assert_eq!(metadata.panes.len(), 3);
+        assert_eq!(metadata.agents.len(), 2);
+        assert!(metadata.panes.iter().all(|pane| pane.scroll.is_none()));
+        assert!(app
+            .terminal_runtimes
+            .values()
+            .all(|runtime| runtime.test_scroll_metrics_reads() == 0));
+
+        let mut public = app.session_snapshot();
+        for pane in &mut public.panes {
+            let scroll = pane
+                .scroll
+                .take()
+                .expect("public session must expose scroll");
+            assert_eq!(scroll.offset_from_bottom, 3);
+            assert!(scroll.max_offset_from_bottom >= 3);
+            assert_eq!(scroll.viewport_rows, 5);
+        }
+        assert_eq!(metadata, public);
+        assert!(app
+            .terminal_runtimes
+            .values()
+            .all(|runtime| runtime.test_scroll_metrics_reads() == 1));
+
+        let (shell, completions) = snapshot_with_completions(&app, "boot", 9, None, None);
+        assert_eq!(shell.panes.len(), 3);
+        assert_eq!(shell.agents.len(), 2);
+        assert_eq!(shell.focused_pane_id, metadata.focused_pane_id);
+        for (pane, public_pane) in shell.panes.iter().zip(&metadata.panes) {
+            assert_eq!(pane.pane_id, public_pane.pane_id);
+            assert_eq!(pane.workspace_id, public_pane.workspace_id);
+            assert_eq!(pane.tab_id, public_pane.tab_id);
+            assert_eq!(pane.cwd, public_pane.cwd);
+        }
+        for (agent, public_agent) in shell.agents.iter().zip(&metadata.agents) {
+            assert_eq!(agent.pane_id, public_agent.pane_id);
+            assert_eq!(agent.name, public_agent.name);
+            assert_eq!(agent.agent_status, public_agent.agent_status);
+            assert_eq!(agent.state_change_seq, 5);
+        }
+        assert_eq!(completions.revision, 9);
+        assert_eq!(completions.completions.len(), 2);
+        assert!(completions.completions.iter().all(|(_, seq)| *seq == 7));
+        assert!(app
+            .terminal_runtimes
+            .values()
+            .all(|runtime| runtime.test_scroll_metrics_reads() == 1));
+    }
 
     #[test]
     fn snapshot_projects_cached_release_and_update_facts() {

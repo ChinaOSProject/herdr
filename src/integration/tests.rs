@@ -4,6 +4,8 @@ use super::env::*;
 use super::file_ops::*;
 use super::registry::*;
 use super::targets::*;
+#[cfg(windows)]
+use super::test_support::symlink_file;
 use super::types::*;
 use super::version::*;
 use super::*;
@@ -1130,7 +1132,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(9));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.expected_version, 11);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     install_claude().unwrap();
@@ -1139,7 +1141,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
         hook_path,
         CLAUDE_INTEGRATION_VERSION,
     );
-    assert_eq!(status.installed_version, Some(10));
+    assert_eq!(status.installed_version, Some(11));
     assert_eq!(status.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
@@ -1169,10 +1171,136 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.expected_version, 11);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn windows_hooks_decode_stdin_as_utf8() {
+    // Windows PowerShell decodes `[Console]::In` with the console input code
+    // page, which corrupts UTF-8 hook payloads on non-UTF-8 locales such as
+    // Korean Windows (CP949) and makes the hook silently drop the session.
+    // Every bundled PowerShell hook must read the raw stdin stream as UTF-8.
+    // See #5253.
+    for (name, asset) in [
+        (
+            "antigravity_cli",
+            include_str!("assets/antigravity_cli/herdr-agent-state.ps1"),
+        ),
+        (
+            "claude",
+            include_str!("assets/claude/herdr-agent-state.ps1"),
+        ),
+        ("codex", include_str!("assets/codex/herdr-agent-state.ps1")),
+        (
+            "copilot",
+            include_str!("assets/copilot/herdr-agent-state.ps1"),
+        ),
+        (
+            "cursor",
+            include_str!("assets/cursor/herdr-agent-state.ps1"),
+        ),
+        ("devin", include_str!("assets/devin/herdr-agent-state.ps1")),
+        ("droid", include_str!("assets/droid/herdr-agent-state.ps1")),
+        ("grok", include_str!("assets/grok/herdr-agent-state.ps1")),
+        ("kimi", include_str!("assets/kimi/herdr-agent-state.ps1")),
+        (
+            "letta",
+            include_str!("assets/letta/herdr-agent-session.ps1"),
+        ),
+        (
+            "mastracode",
+            include_str!("assets/mastracode/herdr-agent-state.ps1"),
+        ),
+        (
+            "qodercli",
+            include_str!("assets/qodercli/herdr-agent-state.ps1"),
+        ),
+        ("qwen", include_str!("assets/qwen/herdr-agent-session.ps1")),
+    ] {
+        assert!(
+            !asset.contains("[Console]::In.ReadToEnd()"),
+            "{name} hook must not decode stdin with the console input code page"
+        );
+        assert!(
+            asset.contains("[Console]::OpenStandardInput()")
+                && asset.contains("[System.Text.Encoding]::UTF8"),
+            "{name} hook must decode raw stdin as UTF-8"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn claude_windows_hook_reports_utf8_session_path() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let previous_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &home);
+    let installed = install_claude().unwrap();
+
+    let capture = base.join("args.txt");
+    let fake_herdr = base.join("herdr-capture.ps1");
+    fs::write(
+        &fake_herdr,
+        "$capture = $env:HERDR_TEST_CAPTURE\n[System.IO.File]::WriteAllText($capture, ($args -join \"`n\"), [System.Text.UTF8Encoding]::new($false))\n",
+    )
+    .unwrap();
+
+    // A Korean profile path: decoded with a non-UTF-8 console input code page
+    // (CP949 on Korean Windows) it garbles the JSON and the hook exits silently.
+    let transcript = "C:\\Users\\\u{d55c}\u{ae00}\\transcript.jsonl";
+    let payload = format!(
+        r#"{{"hook_event_name":"SessionStart","session_id":"claude-session","transcript_path":{}}}"#,
+        serde_json::to_string(transcript).unwrap()
+    );
+
+    let mut child = Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&installed.hook_path)
+        .arg("session")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .env("HERDR_BIN_PATH", &fake_herdr)
+        .env("HERDR_TEST_CAPTURE", &capture)
+        .env_remove("CURSOR_VERSION")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "hook failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let args = fs::read_to_string(&capture).unwrap();
+    assert!(args.contains("report-agent-session"), "captured: {args}");
+    assert!(args.contains("--agent-session-id"), "captured: {args}");
+    assert!(args.contains("claude-session"), "captured: {args}");
+    assert!(args.contains(transcript), "captured: {args}");
+
+    if let Some(home) = previous_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
+    }
     let _ = fs::remove_dir_all(base);
 }
 
@@ -1302,7 +1430,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 8);
+    assert_eq!(codex.expected_version, 10);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1337,6 +1465,7 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(hooks["hooks"].get("Stop").is_none());
+    assert!(hooks["hooks"].get("Interrupt").is_none());
     assert!(config.contains("model = \"gpt-5.4\""));
     assert!(config.contains("[features]"));
     assert!(config.contains("hooks = true"));
@@ -1391,6 +1520,7 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(hooks["hooks"].get("Stop").is_none());
+    assert!(hooks["hooks"].get("Interrupt").is_none());
     assert_eq!(config.matches("hooks = true").count(), 1);
     assert!(!config.contains("codex_hooks"));
     assert!(config.contains("other = true"));
@@ -1425,6 +1555,49 @@ fn install_codex_only_migrates_top_level_feature_flags() {
 }
 
 #[test]
+fn install_codex_removes_turn_status_hooks_from_previous_integration() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let hook = |action| json!({"type": "command", "command": hook_command(&hook_path, Some(action)), "timeout": 10});
+    let hooks = json!({
+        "hooks": {
+            "SessionStart": [{"hooks": [hook("session")]}],
+            "UserPromptSubmit": [{"hooks": [
+                hook("working"),
+                {"type": "command", "command": "echo keep", "timeout": 10}
+            ]}],
+            "Stop": [{"hooks": [hook("idle")]}],
+            "Interrupt": [{"hooks": [hook("idle")]}]
+        }
+    });
+    fs::write(
+        codex_dir.join("hooks.json"),
+        serde_json::to_string(&hooks).unwrap(),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    install_codex().unwrap();
+
+    let hooks: Value =
+        serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        hooks["hooks"]["UserPromptSubmit"][0]["hooks"],
+        json!([{"type": "command", "command": "echo keep", "timeout": 10}])
+    );
+    assert!(hooks["hooks"].get("Stop").is_none());
+    assert!(hooks["hooks"].get("Interrupt").is_none());
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -1442,7 +1615,8 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
             ]}],
             "PreToolUse": [{"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}],
             "PermissionRequest": [{"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}]
+            "Stop": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}],
+            "Interrupt": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}]
         }
     });
     fs::write(
@@ -1469,6 +1643,7 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(hooks["hooks"].get("Stop").is_none());
+    assert!(hooks["hooks"].get("Interrupt").is_none());
     assert_eq!(
         hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
             .as_array()
@@ -2326,6 +2501,69 @@ fn install_opencode_writes_server_and_tui_plugins() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[cfg(unix)]
+#[test]
+fn opencode_reuses_json_registration_in_symlinked_config_directory() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let dotfiles = base.join("dotfiles");
+    let dir = home.join(".config/opencode");
+    fs::create_dir_all(home.join(".config")).unwrap();
+    fs::create_dir_all(&dotfiles).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, &dir).unwrap();
+    std::env::set_var("HOME", &home);
+    let json_path = dir.join("tui.json");
+    let original = "{\n  // User preferences\n  \"theme\":\"system\",\n  \"plugin\":[\"other\",[\"./herdr-tui-session.js\",{\"enabled\":true}]]\n}\n";
+    fs::write(&json_path, original).unwrap();
+
+    for _ in 0..2 {
+        let installed = install_opencode().unwrap();
+        assert_eq!(installed.tui_config_path, json_path);
+        assert!(installed.cli_config_path.is_none());
+        assert!(!dir.join("tui.jsonc").exists());
+        assert_eq!(fs::read_to_string(&json_path).unwrap(), original);
+        assert_eq!(
+            integration_status_at(
+                crate::api::schema::IntegrationTarget::Opencode,
+                installed.plugin_path,
+                OPENCODE_INTEGRATION_VERSION,
+            )
+            .state,
+            IntegrationStatusKind::Current
+        );
+    }
+
+    // Older installs may have registered the same plugin in both files.
+    let jsonc_path = dir.join("tui.jsonc");
+    fs::write(
+        &jsonc_path,
+        r#"{"plugin":["./herdr-tui-session.js","another"]}"#,
+    )
+    .unwrap();
+    assert_eq!(install_opencode().unwrap().tui_config_path, jsonc_path);
+    let result = uninstall_opencode().unwrap();
+    assert_eq!(
+        result.updated_tui_configs,
+        vec![jsonc_path.clone(), json_path.clone()]
+    );
+    let json = fs::read_to_string(&json_path).unwrap();
+    assert!(json.contains("// User preferences"));
+    assert!(!json.contains("herdr-tui-session.js"));
+    assert!(json.contains("\"other\""));
+    assert!(json.contains("\"system\""));
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(jsonc_path).unwrap()).unwrap(),
+        json!({"plugin":["another"]})
+    );
+    assert!(uninstall_opencode().unwrap().updated_tui_configs.is_empty());
+    assert_eq!(fs::read_link(&dir).unwrap(), dotfiles);
+    assert!(!result.plugin_path.exists());
+    assert!(!result.tui_plugin_path.exists());
+    std::env::remove_var("HOME");
+    fs::remove_dir_all(base).unwrap();
+}
+
 #[test]
 fn opencode_install_defers_v2_registration_while_migration_pending() {
     let _lock = integration_env_lock();
@@ -2427,6 +2665,42 @@ fn opencode_hard_link_rejection_precedes_install_and_uninstall_asset_changes() {
     fs::remove_dir_all(base).unwrap();
 }
 
+#[test]
+fn opencode_json_config_validation_precedes_asset_changes() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let dir = home.join(".config/opencode");
+    fs::create_dir_all(dir.join("plugins")).unwrap();
+    std::env::set_var("HOME", &home);
+    let plugin = dir.join("plugins").join(OPENCODE_PLUGIN_INSTALL_NAME);
+    fs::write(&plugin, "previous integration").unwrap();
+    let config = dir.join("tui.json");
+    fs::write(&config, r#"{"plugin":{}}"#).unwrap();
+    assert!(install_opencode()
+        .unwrap_err()
+        .to_string()
+        .contains("plugin list"));
+    assert_eq!(fs::read_to_string(&plugin).unwrap(), "previous integration");
+    let original = r#"{"plugin":["./herdr-tui-session.js"]}"#;
+    fs::write(&config, original).unwrap();
+    let alias = base.join("linked-config");
+    fs::hard_link(&config, &alias).unwrap();
+    for error in [
+        install_opencode().unwrap_err(),
+        uninstall_opencode().unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("multiple hard links"));
+        assert!(error.to_string().contains("tui.json"));
+    }
+    assert_eq!(fs::read_to_string(&plugin).unwrap(), "previous integration");
+    assert_eq!(fs::read_to_string(&alias).unwrap(), original);
+    assert!(!dir.join("tui.jsonc").exists());
+    assert!(!dir.join(OPENCODE_TUI_PLUGIN_INSTALL_NAME).exists());
+    std::env::remove_var("HOME");
+    fs::remove_dir_all(base).unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn opencode_recovery_copy_blocks_retry_before_parsing_or_asset_changes() {
@@ -2466,11 +2740,12 @@ fn opencode_recovery_copy_blocks_retry_before_parsing_or_asset_changes() {
     fs::write(&referent, "{").unwrap();
     let linked_backup = base.join("preferences.json.herdr-backup");
     fs::rename(&backup, &linked_backup).unwrap();
-    std::os::windows::fs::symlink_file(&referent, &config).unwrap();
-    let link_before = fs::read_link(&config).unwrap();
-    let error = install_target(target).unwrap_err();
-    assert!(error.to_string().contains("preferences.json.herdr-backup"));
-    assert_eq!(fs::read_link(&config).unwrap(), link_before);
+    if symlink_file(&referent, &config) {
+        let link_before = fs::read_link(&config).unwrap();
+        let error = install_target(target).unwrap_err();
+        assert!(error.to_string().contains("preferences.json.herdr-backup"));
+        assert_eq!(fs::read_link(&config).unwrap(), link_before);
+    }
     assert_eq!(fs::read_to_string(&plugin).unwrap(), "previous integration");
     assert!(!dir.join("tui.jsonc").exists());
     assert!(!dir.join(OPENCODE_V2_TUI_PLUGIN_DIR).exists());
@@ -2539,12 +2814,15 @@ fn uninstall_opencode_removes_plugins_and_managed_tui_config_entry() {
 
     assert!(result.removed_plugin);
     assert!(result.removed_tui_plugin);
-    assert!(result.updated_tui_config);
+    assert_eq!(
+        result.updated_tui_configs,
+        vec![installed.tui_config_path.clone()]
+    );
     assert!(!result.plugin_path.exists());
     assert!(!result.tui_plugin_path.exists());
-    assert!(result.tui_config_path.exists());
+    assert!(installed.tui_config_path.exists());
     let tui_config: Value =
-        serde_json::from_str(&fs::read_to_string(&result.tui_config_path).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(&installed.tui_config_path).unwrap()).unwrap();
     assert_eq!(tui_config, json!({}));
     assert_eq!(installed.plugin_path, result.plugin_path);
 
@@ -2588,6 +2866,12 @@ fn uninstall_opencode_removes_plugins_when_tui_config_is_invalid() {
     fs::write(&plugin_path, OPENCODE_PLUGIN_ASSET).unwrap();
     fs::write(&tui_plugin_path, OPENCODE_TUI_PLUGIN_ASSET).unwrap();
     fs::write(opencode_dir.join("tui.jsonc"), "{\"plugin\":").unwrap();
+    let json_path = opencode_dir.join("tui.json");
+    fs::write(
+        &json_path,
+        r#"{"plugin":["./herdr-tui-session.js","other"]}"#,
+    )
+    .unwrap();
     std::env::set_var("HOME", &home);
 
     let err = uninstall_opencode().unwrap_err().to_string();
@@ -2595,6 +2879,10 @@ fn uninstall_opencode_removes_plugins_when_tui_config_is_invalid() {
     assert!(err.contains("failed to parse OpenCode TUI config"));
     assert!(!plugin_path.exists());
     assert!(!tui_plugin_path.exists());
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(json_path).unwrap()).unwrap(),
+        json!({"plugin":["other"]})
+    );
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -2793,6 +3081,283 @@ fn install_hermes_converts_inline_enabled_list_to_block_list() {
         config,
         "plugins:\n  enabled:\n    - herdr-agent-state\n    - example-plugin\n"
     );
+}
+
+#[test]
+fn install_hermes_preserves_indentless_enabled_list() {
+    let input = "plugins:\n  enabled:\n  - example-plugin\n  disabled:\n  - other-plugin\n";
+    let actual = update_hermes_enabled_plugin(input, true);
+    assert_eq!(
+        actual,
+        "plugins:\n  enabled:\n  - herdr-agent-state\n  - example-plugin\n  disabled:\n  - other-plugin\n",
+        "new plugin must share the existing sequence indentation"
+    );
+}
+
+#[test]
+fn hermes_block_sequences_preserve_indentation_comments_and_siblings() {
+    for key_indent in [2, 4] {
+        for item_indent in [key_indent, key_indent + 2, key_indent + 4] {
+            let key_padding = " ".repeat(key_indent);
+            let item_padding = " ".repeat(item_indent);
+            let header = format!("plugins:\n{key_padding}enabled: # selected plugins\n");
+            let tail = format!(
+                "{item_padding}# existing plugin\n{item_padding}- 'example-plugin' # keep\n\n{key_padding}disabled:\n{key_padding}- herdr-agent-state\nmodel: example"
+            );
+            let input = format!("{header}{tail}");
+            let expected = format!("{header}{item_padding}- herdr-agent-state\n{tail}");
+            let installed = update_hermes_enabled_plugin(&input, true);
+            assert_eq!(installed, expected);
+            assert_eq!(update_hermes_enabled_plugin(&installed, true), installed);
+            assert_eq!(update_hermes_enabled_plugin(&installed, false), input);
+            assert_eq!(update_hermes_enabled_plugin(&input, false), input);
+        }
+    }
+    for indent in [0, 2, 4] {
+        let padding = " ".repeat(indent);
+        let input = format!(
+            "plugins: # selected\n# keep comment\n{padding}- other-plugin\nmodel: example\n"
+        );
+        let installed = update_hermes_enabled_plugin(&input, true);
+        assert_eq!(installed, format!("plugins: # selected\n{padding}- herdr-agent-state\n# keep comment\n{padding}- other-plugin\nmodel: example\n"));
+        assert_eq!(update_hermes_enabled_plugin(&installed, true), installed);
+        assert_eq!(update_hermes_enabled_plugin(&installed, false), input);
+    }
+}
+
+#[test]
+fn hermes_sequence_membership_is_scoped_to_direct_enabled_items() {
+    for input in [
+        "plugins:\n  disabled:\n  - herdr-agent-state\n  enabled:\n  - other\n",
+        "plugins:\n  enabled:\n    - options:\n        - herdr-agent-state\n",
+    ] {
+        let expected = input.replacen(
+            "  enabled:\n",
+            if input.contains("options:") {
+                "  enabled:\n    - herdr-agent-state\n"
+            } else {
+                "  enabled:\n  - herdr-agent-state\n"
+            },
+            1,
+        );
+        let installed = update_hermes_enabled_plugin(input, true);
+        assert_eq!(installed, expected);
+        assert_eq!(update_hermes_enabled_plugin(&installed, false), input);
+        assert_eq!(update_hermes_enabled_plugin(input, false), input);
+    }
+}
+
+#[test]
+fn install_hermes_does_not_treat_disabled_as_a_flat_plugin_list() {
+    let input = "plugins:\n    disabled:\n    - herdr-agent-state\nmodel: example\n";
+    let installed = update_hermes_enabled_plugin(input, true);
+    assert_eq!(installed, "plugins:\n    enabled:\n      - herdr-agent-state\n    disabled:\n    - herdr-agent-state\nmodel: example\n");
+    assert_eq!(update_hermes_enabled_plugin(&installed, true), installed);
+    let uninstalled = update_hermes_enabled_plugin(&installed, false);
+    assert_eq!(
+        uninstalled,
+        "plugins:\n    enabled: []\n    disabled:\n    - herdr-agent-state\nmodel: example\n"
+    );
+    assert_eq!(
+        update_hermes_enabled_plugin(&uninstalled, false),
+        uninstalled
+    );
+}
+
+#[test]
+fn uninstall_hermes_keeps_empty_sequences_and_removes_duplicate_direct_items() {
+    for (input, expected) in [
+        ("plugins:\n  enabled: # keep\n  - 'herdr-agent-state'\n  - herdr-agent-state # duplicate\n  disabled: []\n", "plugins:\n  enabled: [] # keep\n  disabled: []\n"),
+        ("plugins: # keep\n- herdr-agent-state\n", "plugins: [] # keep\n"),
+        ("plugins:\n    enabled: [herdr-agent-state, herdr-agent-state] # keep\n", "plugins:\n    enabled: [] # keep\n"),
+    ] {
+        let uninstalled = update_hermes_enabled_plugin(input, false);
+        assert_eq!(uninstalled, expected);
+        assert_eq!(update_hermes_enabled_plugin(&uninstalled, false), uninstalled);
+    }
+}
+
+#[test]
+fn uninstall_hermes_preserves_bare_sequence_items() {
+    for (header, indent) in [
+        ("plugins:\n", ""),
+        ("plugins:\n", "  "),
+        ("plugins:\n  enabled:\n", "  "),
+        ("plugins:\n  enabled:\n", "    "),
+    ] {
+        for indicator in ["-", "-   ", "- # keep"] {
+            let remaining = format!("{indent}{indicator}\n{indent}  other-plugin\n");
+            for plugin_first in [true, false] {
+                let plugin = format!("{indent}- herdr-agent-state\n");
+                let input = if plugin_first {
+                    format!("{header}{plugin}{remaining}model: example\n")
+                } else {
+                    format!("{header}{remaining}{plugin}model: example\n")
+                };
+                let expected = format!("{header}{remaining}model: example\n");
+                let uninstalled = update_hermes_enabled_plugin(&input, false);
+                assert_eq!(uninstalled, expected, "input: {input}");
+                assert_eq!(update_hermes_enabled_plugin(&uninstalled, false), expected);
+                let installed = update_hermes_enabled_plugin(&uninstalled, true);
+                assert_eq!(
+                    installed,
+                    format!("{header}{plugin}{remaining}model: example\n")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn uninstall_hermes_preserves_bare_item_in_config_file() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    fs::create_dir_all(&base).unwrap();
+    std::env::set_var(HERMES_HOME_ENV_VAR, &base);
+    let config_path = base.join("config.yaml");
+    let remaining =
+        "plugins:\n  enabled:\n  -\n    other-plugin\n  disabled:\n  - disabled-plugin\n";
+    fs::write(&config_path, remaining).unwrap();
+    install_hermes().unwrap();
+
+    let result = uninstall_hermes().unwrap();
+    assert!(result.removed_plugin_dir);
+    assert!(result.updated_config);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), remaining);
+    assert!(!uninstall_hermes().unwrap().updated_config);
+
+    std::env::remove_var(HERMES_HOME_ENV_VAR);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn uninstall_hermes_preserves_empty_sequence_node_properties() {
+    for properties in [
+        "&selected",
+        "!!seq &selected",
+        "&selected !!seq",
+        "!<tag:yaml.org,2002:seq> &selected",
+    ] {
+        for (header, indent, alias) in [
+            ("plugins:", "  ", "other: *selected\n"),
+            ("plugins:\n  enabled:", "    ", "  disabled: *selected\n"),
+        ] {
+            let input =
+                format!("{header} {properties} # keep\n{indent}- herdr-agent-state\n{alias}");
+            let expected = format!("{header} {properties} [] # keep\n{alias}");
+            let uninstalled = update_hermes_enabled_plugin(&input, false);
+            assert_eq!(uninstalled, expected);
+            assert_eq!(update_hermes_enabled_plugin(&uninstalled, false), expected);
+            assert_eq!(update_hermes_enabled_plugin(&uninstalled, true), input);
+
+            let flow =
+                format!("{header} {properties} [herdr-agent-state, other-plugin] # keep\n{alias}");
+            assert_eq!(
+                update_hermes_enabled_plugin(&flow, false),
+                format!("{header} {properties} # keep\n{indent}- other-plugin\n{alias}")
+            );
+        }
+    }
+}
+
+#[test]
+fn hermes_bare_plugin_items_use_the_continued_scalar() {
+    for (header, indent) in [
+        ("plugins:\n", ""),
+        ("plugins:\n", "  "),
+        ("plugins:\n  enabled:\n", "  "),
+        ("plugins:\n  enabled:\n", "    "),
+    ] {
+        for indicator in ["-", "-   ", "- # plugin"] {
+            for value in [
+                "herdr-agent-state",
+                "'herdr-agent-state'",
+                "\"herdr-agent-state\" # installed",
+            ] {
+                let plugin = format!("{indent}{indicator}\n{indent}  {value}\n");
+                let other = format!("{indent}-\n{indent}  other-plugin\n");
+                for plugin_first in [true, false] {
+                    let items = if plugin_first {
+                        format!("{plugin}{other}")
+                    } else {
+                        format!("{other}{plugin}")
+                    };
+                    let input = format!("{header}{items}model: example\n");
+                    assert_eq!(update_hermes_enabled_plugin(&input, true), input);
+                    let expected = format!("{header}{other}model: example\n");
+                    assert_eq!(update_hermes_enabled_plugin(&input, false), expected);
+                    assert_eq!(update_hermes_enabled_plugin(&expected, false), expected);
+                }
+            }
+        }
+    }
+    let input = "plugins:\n  enabled:\n  - # plugin\n    # keep comment\n\n    herdr-agent-state\n  - herdr-agent-state # duplicate\n  # keep trailing comment\n  disabled: []\n";
+    assert_eq!(
+        update_hermes_enabled_plugin(input, false),
+        "plugins:\n  enabled: []\n    # keep comment\n\n  # keep trailing comment\n  disabled: []\n"
+    );
+}
+
+#[test]
+fn hermes_does_not_match_scalar_prefixes_or_nested_continuations() {
+    for item in [
+        "  - herdr-agent-state\n    other\n",
+        "  -\n    herdr-agent-state\n    other\n",
+        "  -\n    - herdr-agent-state\n",
+    ] {
+        let input = format!("plugins:\n  enabled:\n{item}  disabled: []\n");
+        assert_eq!(update_hermes_enabled_plugin(&input, false), input);
+        let installed = update_hermes_enabled_plugin(&input, true);
+        assert_eq!(
+            installed,
+            format!("plugins:\n  enabled:\n  - herdr-agent-state\n{item}  disabled: []\n")
+        );
+        assert_eq!(update_hermes_enabled_plugin(&installed, false), input);
+    }
+}
+
+#[test]
+fn hermes_flow_sequence_edits_keep_following_comments() {
+    for (input, expected) in [
+        ("plugins: [other] # selected\n# keep following comment\nmodel: example\n", "plugins: # selected\n  - herdr-agent-state\n  - other\n# keep following comment\nmodel: example\n"),
+        ("plugins:\n    enabled: [other] # selected\n    # keep following comment\n    disabled: []\n", "plugins:\n    enabled: # selected\n      - herdr-agent-state\n      - other\n    # keep following comment\n    disabled: []\n"),
+    ] {
+        assert_eq!(update_hermes_enabled_plugin(input, true), expected);
+        assert_eq!(update_hermes_enabled_plugin(expected, true), expected);
+    }
+}
+
+#[test]
+fn hermes_install_and_uninstall_are_idempotent_with_indentless_config() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    fs::create_dir_all(&base).unwrap();
+    std::env::set_var(HERMES_HOME_ENV_VAR, &base);
+    let input = "plugins:\n  enabled:\n  - example-plugin\n  disabled:\n  - other-plugin\n";
+    let config_path = base.join("config.yaml");
+    fs::write(&config_path, input).unwrap();
+
+    let installed = install_hermes().unwrap();
+    let first = fs::read_to_string(&config_path).unwrap();
+    assert_eq!(first, "plugins:\n  enabled:\n  - herdr-agent-state\n  - example-plugin\n  disabled:\n  - other-plugin\n");
+    assert!(installed
+        .plugin_dir
+        .join(HERMES_PLUGIN_INIT_INSTALL_NAME)
+        .is_file());
+    install_hermes().unwrap();
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), first);
+
+    let uninstalled = uninstall_hermes().unwrap();
+    assert!(uninstalled.removed_plugin_dir);
+    assert!(uninstalled.updated_config);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), input);
+    let again = uninstall_hermes().unwrap();
+    assert!(!again.removed_plugin_dir);
+    assert!(!again.updated_config);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), input);
+
+    std::env::remove_var(HERMES_HOME_ENV_VAR);
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -3434,7 +3999,7 @@ fn install_qwen_writes_session_hook_and_preserves_settings() {
     assert!(settings.get("permissions").is_some());
     let hook_asset = fs::read_to_string(&installed.hook_path).unwrap();
     assert!(hook_asset.contains("HERDR_INTEGRATION_ID=qwen"));
-    assert!(hook_asset.contains("HERDR_INTEGRATION_VERSION=1"));
+    assert!(hook_asset.contains("HERDR_INTEGRATION_VERSION=2"));
     assert!(hook_asset.contains("herdr:qwen"));
 
     install_qwen().unwrap();
@@ -3812,7 +4377,7 @@ fn install_cursor_uses_cursor_config_dir_env() {
 }
 
 #[test]
-fn cursor_v1_integration_status_is_current() {
+fn cursor_v1_integration_status_is_outdated() {
     let _lock = integration_env_lock();
     let base = unique_base();
     let cursor_dir = base.join(".cursor");
@@ -3830,8 +4395,9 @@ fn cursor_v1_integration_status_is_current() {
         .iter()
         .find(|status| status.target == crate::api::schema::IntegrationTarget::Cursor)
         .expect("cursor integration status");
-    assert_eq!(cursor.state, IntegrationStatusKind::Current);
-    assert_eq!(cursor.installed_version, Some(CURSOR_INTEGRATION_VERSION));
+    assert_eq!(cursor.installed_version, Some(1));
+    assert_eq!(cursor.expected_version, CURSOR_INTEGRATION_VERSION);
+    assert_eq!(cursor.state, IntegrationStatusKind::Outdated);
 
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
@@ -4323,7 +4889,7 @@ fn install_antigravity_cli_writes_hook_and_updates_hooks_json() {
 }
 
 #[test]
-fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
+fn antigravity_cli_v3_install_is_outdated_until_reinstalled() {
     let _lock = integration_env_lock();
     let base = unique_base();
     let agy_dir = base.join(".gemini").join("config");
@@ -4332,7 +4898,7 @@ fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
     fs::write(
         hook_dir.join(ANTIGRAVITY_CLI_HOOK_INSTALL_NAME),
         ANTIGRAVITY_CLI_HOOK_ASSET
-            .replace("HERDR_INTEGRATION_VERSION=3", "HERDR_INTEGRATION_VERSION=2"),
+            .replace("HERDR_INTEGRATION_VERSION=4", "HERDR_INTEGRATION_VERSION=3"),
     )
     .unwrap();
     std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
@@ -4345,8 +4911,8 @@ fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
     };
     let outdated = status();
     assert_eq!(outdated.state, IntegrationStatusKind::Outdated);
-    assert_eq!(outdated.installed_version, Some(2));
-    assert_eq!(outdated.expected_version, 3);
+    assert_eq!(outdated.installed_version, Some(3));
+    assert_eq!(outdated.expected_version, 4);
 
     install_antigravity_cli().unwrap();
     assert_eq!(status().state, IntegrationStatusKind::Current);

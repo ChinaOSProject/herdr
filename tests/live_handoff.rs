@@ -33,7 +33,7 @@ struct RequestError {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         unregister_spawned_herdr_pid(pid);
     }
 }
@@ -78,6 +78,7 @@ fn spawn_server_with_env(
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -121,6 +122,7 @@ fn spawn_named_session_server(
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -155,6 +157,7 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -196,6 +199,7 @@ fn spawn_server_with_args_and_socket_env(
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     if let Some(session_name) = session_name {
         cmd.arg("--session");
         cmd.arg(session_name);
@@ -408,6 +412,50 @@ fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> Strin
         "{} did not contain {needle:?}; last text was {last_text:?}",
         path.display()
     );
+}
+
+fn wait_for_pid_marker(path: &Path, timeout: Duration) -> u32 {
+    // Shell redirection creates the file before echo writes the PID. Wait for
+    // the newline too, so a partially written PID cannot be accepted.
+    let text = wait_for_file_contains(path, "\n", timeout);
+    text.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().last())
+        .and_then(|pid| pid.parse().ok())
+        .filter(|pid| *pid > 0)
+        .unwrap_or_else(|| panic!("invalid PID marker at {}: {text:?}", path.display()))
+}
+
+#[test]
+fn pid_marker_waits_for_complete_line() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let marker = base.join("child.pid");
+    // Keep each incomplete marker unchanged throughout the wait. In particular,
+    // READY 12 must time out rather than return a truncated but parseable PID.
+    for partial in ["", "READY ", "READY 12"] {
+        fs::write(&marker, partial).unwrap();
+        let timeout = Duration::from_millis(100);
+        let started = Instant::now();
+        let panic = std::panic::catch_unwind(|| wait_for_pid_marker(&marker, timeout))
+            .expect_err("incomplete marker should time out");
+        assert!(
+            started.elapsed() >= timeout,
+            "marker {partial:?} failed early"
+        );
+        let message = panic.downcast_ref::<String>().expect("timeout diagnostic");
+        assert_eq!(
+            message,
+            &format!(
+                "{} did not contain {:?}; last text was {partial:?}",
+                marker.display(),
+                "\n"
+            )
+        );
+    }
+    fs::write(&marker, "READY 1234\n").unwrap();
+    assert_eq!(wait_for_pid_marker(&marker, Duration::from_secs(1)), 1234);
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -1014,17 +1062,8 @@ fn live_handoff_preserves_pane_process_io() {
             "params": {"pane_id": second_pane_id, "text": second_command, "keys": ["Enter"]}
         }),
     ));
-    support::wait_for_file(&marker, Duration::from_secs(5));
-    support::wait_for_file(&second_marker, Duration::from_secs(5));
-    let pid_text = fs::read_to_string(&marker).unwrap();
-    let child_pid: u32 = pid_text.split_whitespace().last().unwrap().parse().unwrap();
-    let second_pid_text = fs::read_to_string(&second_marker).unwrap();
-    let second_child_pid: u32 = second_pid_text
-        .split_whitespace()
-        .last()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let child_pid = wait_for_pid_marker(&marker, Duration::from_secs(5));
+    let second_child_pid = wait_for_pid_marker(&second_marker, Duration::from_secs(5));
     assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
     assert_eq!(unsafe { libc::kill(second_child_pid as libc::pid_t, 0) }, 0);
 
@@ -1955,9 +1994,7 @@ fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
             "params": {"pane_id": pane_id, "text": command, "keys": ["Enter"]}
         }),
     ));
-    support::wait_for_file(&marker, Duration::from_secs(5));
-    let pid_text = fs::read_to_string(&marker).unwrap();
-    let child_pid: u32 = pid_text.split_whitespace().last().unwrap().parse().unwrap();
+    let child_pid = wait_for_pid_marker(&marker, Duration::from_secs(5));
 
     let failed = request(
         &api_socket,
@@ -2041,9 +2078,7 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
             "params": {"pane_id": pane_id, "text": command, "keys": ["Enter"]}
         }),
     ));
-    support::wait_for_file(&marker, Duration::from_secs(5));
-    let pid_text = fs::read_to_string(&marker).unwrap();
-    let child_pid: u32 = pid_text.split_whitespace().last().unwrap().parse().unwrap();
+    let child_pid = wait_for_pid_marker(&marker, Duration::from_secs(5));
 
     let failed = request(
         &api_socket,

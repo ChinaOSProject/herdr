@@ -5,7 +5,6 @@ mod agents;
 mod env;
 mod integrations;
 mod layouts;
-mod pane_graphics;
 mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
@@ -39,6 +38,14 @@ impl App {
                 segment_index,
                 result,
             } => self.handle_tab_bar_command_finished(generation, segment_index, result),
+            AppEvent::WorktreeReadFinished(result) => {
+                let changes_workspace = matches!(
+                    &result.request.method,
+                    crate::api::schema::Method::WorktreeOpen(_)
+                );
+                self.handle_api_worktree_read_finished(*result);
+                changes_workspace
+            }
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -116,6 +123,34 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::RestoredWorktreeSpaceChecked {
+            workspace_id,
+            expected,
+            valid,
+        } = ev
+        {
+            self.pending_restored_worktree_spaces
+                .retain(|(id, space)| id != &workspace_id || space != &expected);
+            let changed_workspace = (!valid)
+                .then(|| {
+                    self.state.workspaces.iter().position(|workspace| {
+                        workspace.id == workspace_id
+                            && workspace.worktree_space.as_ref() == Some(&expected)
+                    })
+                })
+                .flatten();
+            self.state
+                .handle_app_event(AppEvent::RestoredWorktreeSpaceChecked {
+                    workspace_id,
+                    expected,
+                    valid,
+                });
+            if let Some(ws_idx) = changed_workspace {
+                self.emit_workspace_updated(ws_idx);
+            }
+            return Vec::new();
+        }
+
         if let AppEvent::TabBarCommandFinished {
             generation,
             segment_index,
@@ -154,6 +189,11 @@ impl App {
                     crate::api::schema::PluginCommandStatus::Failed
                 };
             }
+            return Vec::new();
+        }
+
+        if let AppEvent::WorktreeReadFinished(result) = ev {
+            self.handle_api_worktree_read_finished(*result);
             return Vec::new();
         }
 
@@ -450,6 +490,7 @@ impl App {
                     runtime.set_full_lifecycle_authority_active(
                         terminal.full_lifecycle_hook_authority_active(),
                     );
+                    runtime.set_self_reported_agent_active(terminal.self_reported_agent_active());
                 }
             }
         }
@@ -553,7 +594,13 @@ impl App {
             .terminal_runtimes
             .get(&terminal_id)
             .map(|runtime| runtime.current_size())
-            .unwrap_or_else(|| self.state.estimate_pane_size());
+            .unwrap_or_else(|| {
+                self.state
+                    .new_pane_size(crate::ui::NewPanePlacement::Existing {
+                        ws_idx,
+                        pane: pane_id,
+                    })
+            });
         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
             return false;
         };
@@ -899,6 +946,13 @@ impl App {
                     result: ResponseResult::Ok {},
                 }
             }
+            Method::ServerSshAgentRegister(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "connection_local_only",
+                    "SSH agent registration requires a persistent local JSON API connection",
+                );
+            }
             Method::ServerLiveHandoff(_) => {
                 let response = ErrorResponse {
                     id: request.id,
@@ -1028,7 +1082,13 @@ impl App {
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target);
             }
-            Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
+            Method::WorktreeList(_) | Method::WorktreeOpen(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "worktree discovery is handled asynchronously by the app runtime",
+                );
+            }
             Method::WorktreeCreate(params) => {
                 let _ = params;
                 return responses::encode_error(
@@ -1037,7 +1097,6 @@ impl App {
                     "worktree.create is handled asynchronously by the app runtime",
                 );
             }
-            Method::WorktreeOpen(params) => return self.handle_worktree_open(request.id, params),
             Method::WorktreeRemove(params) => {
                 let _ = params;
                 return responses::encode_error(
@@ -1101,6 +1160,7 @@ impl App {
             }
             Method::PaneResize(params) => return self.handle_pane_resize(request.id, params),
             Method::PaneScroll(params) => return self.handle_pane_scroll(request.id, params),
+            Method::PaneClear(target) => return self.handle_pane_clear(request.id, target),
             Method::PaneEditScrollback(target) => {
                 return self.handle_pane_edit_scrollback(request.id, target);
             }
@@ -1126,34 +1186,6 @@ impl App {
             }
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
-            Method::PaneGraphicsSet(params) => {
-                return self.handle_pane_graphics_set(request.id, params);
-            }
-            Method::PaneGraphicsClear(params) => {
-                return self.handle_pane_graphics_clear(request.id, params);
-            }
-            Method::PaneGraphicsInfo(params) => {
-                return self.handle_pane_graphics_info(request.id, params);
-            }
-            Method::PaneGraphicsStream(_) => {
-                return responses::encode_error(
-                    request.id,
-                    "stream_transport_required",
-                    "pane.graphics.stream requires the streaming socket transport",
-                );
-            }
-            Method::PaneGraphicsStreamSet(params) => {
-                return self.handle_pane_graphics_stream_set(request.id, params);
-            }
-            Method::PaneGraphicsStreamDirect(params) => {
-                return self.handle_pane_graphics_stream_direct(request.id, params);
-            }
-            Method::PaneGraphicsStreamOpen(params) => {
-                return self.handle_pane_graphics_stream_open(request.id, params);
-            }
-            Method::PaneGraphicsStreamClose(params) => {
-                return self.handle_pane_graphics_stream_close(request.id, params);
-            }
             Method::PaneReportAgent(params) => {
                 return self.handle_pane_report_agent(request.id, params);
             }
@@ -1556,8 +1588,17 @@ mod tests {
             .attached_terminal_id
             .clone();
         let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        #[cfg(unix)]
+        let (runtime, _detection_events) = {
+            let mut runtime = runtime;
+            runtime.test_process_pty_bytes(b"shell prompt");
+            let events = runtime.test_start_basic_detection();
+            runtime.test_wait_for_detection_reads(1).await;
+            (runtime, events)
+        };
+        #[cfg(not(unix))]
         let reset_notify = runtime.agent_detection_reset_notify_for_test();
-        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
 
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "reload_manifests".into(),
@@ -1572,6 +1613,13 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        #[cfg(unix)]
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_wait_for_detection_reads(2)
+            .await;
+        #[cfg(not(unix))]
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
             reset_notify.notified(),

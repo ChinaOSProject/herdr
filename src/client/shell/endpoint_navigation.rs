@@ -203,11 +203,23 @@ impl ClientShellState {
                 _ => unreachable!("endpoint agent navigation"),
             };
             let target = &agents[next];
-            self.focus_or_activate(
+            if self.focus_or_activate(
                 target.endpoint_id.clone(),
                 ClientEndpointFocusTarget::Pane(target.pane_id.clone()),
                 outcome,
-            );
+            ) {
+                if target.endpoint_id == self.active_endpoint_id {
+                    self.reveal_endpoint_agent(
+                        &target.endpoint_id,
+                        &target.pane_id,
+                        self.hits.agent_body.height,
+                    );
+                } else {
+                    self.pending_agent_reveal =
+                        Some((target.endpoint_id.clone(), target.pane_id.clone()));
+                }
+                outcome.repaint = true;
+            }
             return true;
         }
         false
@@ -218,6 +230,8 @@ impl ClientShellState {
         endpoint_id: ClientEndpointId,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        self.pending_workspace_highlight = None;
+        self.pending_agent_reveal = None;
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();
@@ -242,6 +256,12 @@ impl ClientShellState {
         target: ClientEndpointFocusTarget,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        #[cfg(windows)]
+        if !self.notification_target_is_current(&endpoint_id, &target) {
+            return false;
+        }
+        self.pending_workspace_highlight = None;
+        self.pending_agent_reveal = None;
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();
@@ -264,6 +284,12 @@ impl ClientShellState {
                     crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget { tab_id })
                 }
                 ClientEndpointFocusTarget::Pane(pane_id) => {
+                    crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
+                        pane_id,
+                    })
+                }
+                #[cfg(windows)]
+                ClientEndpointFocusTarget::Notification { pane_id, .. } => {
                     crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
                         pane_id,
                     })

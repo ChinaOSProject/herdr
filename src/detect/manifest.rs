@@ -416,23 +416,6 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
     explain(agent, screen_content)
 }
 
-pub fn should_skip_state_update(agent: Agent, screen_content: &str) -> bool {
-    let Some(loaded) = load_manifest(agent) else {
-        return false;
-    };
-    evaluate_loaded_manifest(
-        agent,
-        DetectionInput {
-            screen: screen_content,
-            osc_title: "",
-            osc_progress: "",
-        },
-        loaded,
-        false,
-    )
-    .skip_state_update
-}
-
 impl DetectionExplain {
     fn into_detection(self) -> AgentDetection {
         AgentDetection {

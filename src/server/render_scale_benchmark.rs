@@ -16,7 +16,6 @@ const ROWS: u16 = 40;
 const SAMPLE_COUNT: usize = 40;
 const WARMUP_COUNT: usize = 5;
 const CARDINALITIES: [usize; 3] = [1, 15, 50];
-const CLIENT_CARDINALITIES: [usize; 2] = [1, 4];
 
 #[derive(Clone, Copy)]
 struct StageStats {
@@ -95,7 +94,8 @@ impl RenderPipeline {
             },
             &self.graphics_delivery,
             1,
-        );
+        )
+        .expect("benchmark surface");
         let server_elapsed = started.elapsed();
         self.graphics_delivery = rendered.graphics_delivery;
 
@@ -232,14 +232,56 @@ fn profile_snapshot_encoding(
     build: fn(usize) -> Vec<Workspace>,
     count: usize,
     client_count: usize,
-) -> StageStats {
-    let pipeline = RenderPipeline::new(build(count));
+    hidden_output: bool,
+) -> (StageStats, StageStats) {
+    let mut pipeline = RenderPipeline::new(build(count));
+    pipeline.app.state.ensure_test_terminals();
+    for terminal in pipeline.app.state.terminals.values_mut() {
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.last_agent_state_change_seq = Some(1);
+        terminal.last_agent_completion_seq = Some(1);
+    }
     let run = || {
+        if hidden_output {
+            for (workspace_index, workspace) in
+                pipeline.app.state.workspaces.iter().enumerate().skip(1)
+            {
+                let pane_id = workspace.tabs[0].root_pane;
+                pipeline
+                    .app
+                    .state
+                    .runtime_for_pane_in_workspace(
+                        &pipeline.app.terminal_runtimes,
+                        workspace_index,
+                        pane_id,
+                    )
+                    .unwrap()
+                    .test_process_pty_bytes(b"hidden output\r\n");
+            }
+        }
         let started = Instant::now();
-        let template = super::client_shell::snapshot(&pipeline.app, "bench-boot", 1, None, None);
+        let (template, completions) = super::client_shell::snapshot_with_completions(
+            &pipeline.app,
+            "bench-boot",
+            1,
+            None,
+            None,
+        );
+        let construction_elapsed = started.elapsed();
         for client_index in 0..client_count {
             let mut snapshot = template.clone();
             snapshot.revision = client_index as u64 + 1;
+            let mut completions = completions.clone();
+            completions.revision = snapshot.revision;
+            let companion = crate::protocol::endpoint::agent_completions_message(&completions)
+                .expect("benchmark completion projection should serialize");
+            black_box(
+                bincode::serde::encode_to_vec(companion, bincode::config::standard())
+                    .expect("benchmark completion projection should frame"),
+            );
             let message = crate::protocol::endpoint::snapshot_message(&snapshot)
                 .expect("benchmark snapshot should serialize");
             black_box(
@@ -247,24 +289,31 @@ fn profile_snapshot_encoding(
                     .expect("benchmark snapshot message should frame"),
             );
         }
-        started.elapsed()
+        (construction_elapsed, started.elapsed())
     };
     for _ in 0..WARMUP_COUNT {
         black_box(run());
     }
-    summarize((0..SAMPLE_COUNT).map(|_| run()).collect())
+    let (construction, total) = (0..SAMPLE_COUNT).map(|_| run()).unzip();
+    (summarize(construction), summarize(total))
 }
 
 fn print_snapshot_encoding_profiles(label: &str, build: fn(usize) -> Vec<Workspace>) {
-    println!("{label} snapshot projection + JSON framing");
-    println!("       panes  clients  median_us  p95_us  max_us");
-    for count in CARDINALITIES {
-        for client_count in CLIENT_CARDINALITIES {
-            let stats = profile_snapshot_encoding(build, count, client_count);
-            println!(
-                "  {count:>10}  {client_count:>7}  {:>9}  {:>6}  {:>6}",
-                stats.median_us, stats.p95_us, stats.max_us
-            );
+    println!("{label} populated agent snapshots + completions + JSON framing");
+    println!("       panes  clients  hidden_output  construction_us  median_us  p95_us  max_us");
+    for count in [1, 15, 118] {
+        for client_count in [1, 2] {
+            for hidden_output in [false, true] {
+                if hidden_output && label != "background workspaces" {
+                    continue;
+                }
+                let (construction, stats) =
+                    profile_snapshot_encoding(build, count, client_count, hidden_output);
+                println!(
+                    "  {count:>10}  {client_count:>7}  {hidden_output:>13}  {:>15}  {:>9}  {:>6}  {:>6}",
+                    construction.median_us, stats.median_us, stats.p95_us, stats.max_us
+                );
+            }
         }
     }
 }
@@ -352,7 +401,8 @@ fn surface_encoding_client(mode: &str, surface: &PaneSurfaceFrame) -> SurfaceEnc
         state: super::render_stream::ClientRenderState::new(
             crate::protocol::RenderEncoding::SemanticFrame,
         ),
-        decoder: (reuse || delta).then(|| crate::protocol::surface_reuse::Decoder::new(delta)),
+        decoder: (reuse || delta)
+            .then(|| crate::protocol::surface_reuse::Decoder::new(delta, false)),
     };
     client.state.enable_surface_reuse(reuse);
     client.state.enable_surface_delta(delta);
@@ -446,7 +496,8 @@ fn print_surface_damage_profiles() {
             HostCellSize::default(),
             &pipeline.graphics_delivery,
             1,
-        );
+        )
+        .expect("benchmark surface");
         let mut surface = PaneSurfaceFrame {
             boot_id: "bench-boot".into(),
             projection_revision: 1,
@@ -497,7 +548,8 @@ fn print_surface_reuse_profiles() {
                 HostCellSize::default(),
                 &pipeline.graphics_delivery,
                 1,
-            );
+            )
+            .expect("benchmark surface");
             let surface = PaneSurfaceFrame {
                 boot_id: "bench-boot".into(),
                 projection_revision: 1,
@@ -561,4 +613,40 @@ async fn render_scale_profile() {
     print_token_rule_profiles();
     print_surface_reuse_profiles();
     print_surface_damage_profiles();
+}
+
+/// Dirty-row collection while output scrolls a large pane, the host's hot path
+/// for streaming agents and build logs.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "manual dirty collection profile"]
+async fn dirty_scroll_collection_profile() {
+    const WIDTH: u16 = 295;
+    const HEIGHT: u16 = 84;
+    let runtime = TerminalRuntime::test_with_scrollback_bytes(WIDTH, HEIGHT, 1024 * 1024, b"");
+    let mut samples = Vec::new();
+    let mut rows = 0;
+    for line in 0..2_000u32 {
+        runtime.test_process_pty_bytes(
+            format!("{:010}{:010}\r\n", line.wrapping_mul(2_654_435_761), line).as_bytes(),
+        );
+        let started = Instant::now();
+        let snapshot = black_box(runtime.collect_dirty_patch_snapshot(WIDTH, HEIGHT));
+        if line as usize >= WARMUP_COUNT {
+            samples.push(started.elapsed());
+        }
+        if let Some(crate::pane::TerminalDirtyPatchOutcome::Patch(patch)) =
+            snapshot.map(|snapshot| snapshot.patch)
+        {
+            rows += patch.rows.len();
+        }
+    }
+    samples.sort_unstable();
+    let at = |fraction: f64| samples[((samples.len() - 1) as f64 * fraction) as usize].as_micros();
+    println!(
+        "dirty scroll collection {WIDTH}x{HEIGHT}: median {}us p95 {}us max {}us, {} rows per update",
+        at(0.5),
+        at(0.95),
+        at(1.0),
+        rows / 2_000
+    );
 }
