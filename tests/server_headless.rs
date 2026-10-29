@@ -576,6 +576,15 @@ fn wait_for_log_line(path: &Path, needle: &str, timeout: Duration) -> String {
 
 #[test]
 fn server_survives_hangup_and_logs_why_it_stops() {
+    assert_server_survives_hangup_and_stops(libc::SIGTERM, "SIGTERM");
+}
+
+#[test]
+fn server_survives_hangup_and_logs_interrupt() {
+    assert_server_survives_hangup_and_stops(libc::SIGINT, "SIGINT");
+}
+
+fn assert_server_survives_hangup_and_stops(signal: libc::c_int, name: &str) {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -596,17 +605,17 @@ fn server_survives_hangup_and_logs_why_it_stops() {
     );
     assert!(ping_socket(&api_socket).contains("pong"));
 
-    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
     assert!(
         wait_for_exit(&mut spawned.child, Duration::from_secs(10)),
-        "server must stop on SIGTERM"
+        "server must stop on {name}"
     );
     let line = wait_for_log_line(
         &server_log_path(&config_home),
         "server shutdown initiated",
         Duration::from_secs(5),
     );
-    assert!(line.contains("reason=SIGTERM"), "{line}");
+    assert!(line.contains(&format!("reason={name}")), "{line}");
 
     cleanup_spawned_herdr(spawned, base);
 }
